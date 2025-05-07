@@ -10,35 +10,10 @@ A fast, concurrent network ping sweep tool that supports multiple output formats
 - Support for CIDR notation
 
 ## Requirements
-- `prips` - IP address expansion tool
+
+- `prips` - IP address expansion tool ([installation instructions](#installing-prips))
 - `ping` - Network ping utility
 - `dig` - DNS lookup utility
-
-## Installing prips
-
-### macOS
-
-```bash
-brew install prips
-```
-
-### Debian/Ubuntu (APT-based)
-
-```bash
-sudo apt-get update
-sudo apt-get install prips
-```
-
-### RHEL/CentOS/Fedora (RPM-based)
-
-```bash
-# For Fedora
-sudo dnf install prips
-
-# For RHEL/CentOS
-sudo yum install epel-release
-sudo yum install prips
-```
 
 ## Installation
 This tool is designed to be used as a function in a zsh shell environment.
@@ -83,3 +58,29 @@ bash /path/to/pingsweep [options] <CIDR subnet>
 
   bash /path/to/pingsweep 192.168.1.0/24
   bash /path/to/pingsweep -f yaml 10.0.0.0/24
+
+## Installing prips
+
+### macOS
+
+```bash
+brew install prips
+```
+
+### Debian/Ubuntu (APT-based)
+
+```bash
+sudo apt-get update
+sudo apt-get install prips
+```
+
+### RHEL/CentOS/Fedora (RPM-based)
+
+```bash
+# For Fedora
+sudo dnf install prips
+
+# For RHEL/CentOS
+sudo yum install epel-release
+sudo yum install prips
+```
