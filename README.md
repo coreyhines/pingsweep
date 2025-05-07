@@ -83,15 +83,13 @@ bash /path/to/pingsweep [options] <CIDR subnet>
 ```bash
 ~ » pingsweep 192.168.1.0/24
 Scanning 192.168.1.0/24...
-192.168.1.1      up (GREEN)      router.local
-192.168.1.5      up (GREEN)      laptop.local
-192.168.1.10     up (GREEN)      desktop.local
-192.168.1.20     down (RED)      printer.local
-192.168.1.25     up (GREEN)      
+192.168.1.1      up          router.local
+192.168.1.5      up          laptop.local
+192.168.1.10     up          desktop.local
+192.168.1.20     down        printer.local
+192.168.1.25     up          
 Found 5 hosts in 3s
 ```
-
-Note: In actual output, "up" appears in green and "down" appears in red. The (GREEN) and (RED) indicators above are just to show where color would appear in your terminal.
 
 ##### JSON Output
 
