@@ -72,6 +72,7 @@ bash /path/to/pingsweep [options] <CIDR subnet>
 ### Options
 
   -f, --format FORMAT    Output format: text (default), json, or yaml
+
   -h, --help            Show this help message
 
 ### Examples
