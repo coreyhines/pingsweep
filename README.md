@@ -41,7 +41,7 @@ You can manually add the function to your shell configuration:
 
    ```bash
    # Add this to your .zshrc file
-   function pingsweep() {
+   pingsweep() {
      # Paste the entire function here from the pingsweep file
    }
    ```
