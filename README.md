@@ -78,8 +78,9 @@ bash /path/to/pingsweep [options] <CIDR subnet>
 
 # As a zsh function
 
-  pingsweep 192.168.1.0/24
-  pingsweep -f json 192.168.1.0/24
+ ~ » pingsweep 192.168.1.0/24
+ ~ » pingsweep -f json 192.168.1.0/24
+ ~ » pingsweep -f yaml 192.168.1.0/24
   
 # Direct bash execution
 
