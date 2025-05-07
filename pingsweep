@@ -1,0 +1,173 @@
+pingsweep() {
+  # Check if prips is installed and install it if not
+  if ! command -v prips >/dev/null 2>&1; then
+    echo "Error: prips is not installed."
+    if [[ "$OSTYPE" == "darwin"* ]]; then # macOS
+      echo "Install it with: brew install prips"
+    elif command -v apt-get >/dev/null 2>&1; then # Debian/Ubuntu
+      echo "Install it with: sudo apt-get install prips"
+    elif command -v yum >/dev/null 2>&1; then # CentOS/RHEL
+      echo "Install it with: sudo yum install prips"
+    # Add other package managers if needed
+    fi
+    return 1
+  fi
+
+  local format="text"
+  local subnet=""
+
+  # Parse command line arguments
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -f|--format)
+        format="$2"
+        shift 2
+        ;;
+      -h|--help)
+        echo "Usage: pingsweep [options] <CIDR subnet>"
+        echo "Options:"
+        echo "  -f, --format FORMAT    Output format: text (default), json, or yaml"
+        echo "  -h, --help            Show this help message"
+        echo "Example: pingsweep 192.168.1.0/24"
+        echo "         pingsweep -f json 192.168.1.0/24"
+        return 0
+        ;;
+      *)
+        subnet="$1"
+        shift
+        ;;
+    esac
+  done
+
+  # Validate format
+  if [[ "$format" != "text" && "$format" != "json" && "$format" != "yaml" ]]; then
+    echo "Error: Invalid format. Supported formats are: text, json, yaml"
+    return 1
+  fi
+
+  # Check if subnet is provided
+  if [ -z "$subnet" ]; then
+    echo "Error: CIDR subnet is required"
+    echo "Use -h or --help for usage information"
+    return 1
+  fi
+  set +m  # Disable job control messages
+  echo "Scanning $subnet..."
+  local max_jobs=255 # Number of concurrent pings
+  local count=0
+  local start_time=$(date +%s)
+  local live_hosts=0
+
+  # Use a subshell for backgrounding and collecting results to sort later
+  # This avoids issues with `wait` inside a pipeline if not careful
+  # and ensures `sort` gets all data.
+  local results_file=$(mktemp)
+  trap "rm -f $results_file" EXIT # Ensure temp file is cleaned up
+
+  local GREEN=$'\033[0;32m'
+  local RED=$'\033[0;31m'
+  local NC=$'\033[0m'  # No Color
+  local STATUS_PAD=12  # Padding for status column
+
+  exec 3>&2 2>/dev/null  # Save stderr and redirect it to null
+  while IFS= read -r ip; do
+    {
+      hostname=$(dig +time=1 +tries=1 +short -x "$ip" 2>/dev/null | sed 's/\.$//')
+      if ping -c1 -W1 "$ip" >/dev/null 2>&1; then
+        if [[ -n "$hostname" ]]; then
+          echo "$ip up $hostname" >> "$results_file"
+        else
+          echo "$ip up" >> "$results_file"
+        fi
+      elif [[ -n "$hostname" ]]; then
+        echo "$ip down $hostname" >> "$results_file"
+      fi
+    } >> "$results_file" &
+    ((count++))
+    if (( count % max_jobs == 0 )); then
+      wait
+    fi
+  done < <(prips "$subnet")
+
+  wait
+  exec 2>&3  # Restore stderr
+
+  # Calculate end time before processing results
+  local end_time=$(date +%s)
+  
+  # Process and display results
+  if [ -s "$results_file" ]; then
+    local sorted_results=$(sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$results_file")
+    live_hosts=$(wc -l < "$results_file" | tr -d ' ')
+    
+    case "$format" in
+      "json")
+        echo "{"
+        echo "  \"results\": ["
+        local first=true
+        while IFS= read -r line; do
+          if [[ "$first" != true ]]; then
+            echo ","
+          fi
+          first=false
+          # Split line into fields
+          ip=$(echo "$line" | cut -d' ' -f1)
+          host_status=$(echo "$line" | cut -d' ' -f2)
+          hostname=$(echo "$line" | cut -d' ' -f3- -s)
+          if [[ -n "$hostname" ]]; then
+            printf '    {"ip": "%s", "status": "%s", "hostname": "%s"}' \
+              "$ip" "$host_status" "$hostname"
+          else
+            printf '    {"ip": "%s", "status": "%s"}' "$ip" "$host_status"
+          fi
+        done <<< "$sorted_results"
+        echo
+        echo "  ],"
+        echo "  \"stats\": {"
+        printf '    "total_hosts": %d,\n' "$live_hosts"
+        printf '    "scan_time_seconds": %d\n' "$((end_time-start_time))"
+        echo "  }"
+        echo "}"
+        ;;
+        
+      "yaml")
+        echo "results:"
+        while IFS= read -r line; do
+          # Split line into fields
+          ip=$(echo "$line" | cut -d' ' -f1)
+          host_status=$(echo "$line" | cut -d' ' -f2)
+          hostname=$(echo "$line" | cut -d' ' -f3- -s)
+          if [[ -n "$hostname" ]]; then
+            printf '  - ip: %s\n    status: %s\n    hostname: %s\n' \
+              "$ip" "$host_status" "$hostname"
+          else
+            printf '  - ip: %s\n    status: %s\n' "$ip" "$host_status"
+          fi
+        done <<< "$sorted_results"
+        echo "stats:"
+        printf '  total_hosts: %d\n' "$live_hosts"
+        printf '  scan_time_seconds: %d\n' "$((end_time-start_time))"
+        ;;
+        
+      *)  # text format (default)
+        while IFS= read -r line; do
+          ip=$(echo "$line" | cut -d' ' -f1)
+          host_status=$(echo "$line" | cut -d' ' -f2)
+          hostname=$(echo "$line" | cut -d' ' -f3- -s)
+          if [[ "$host_status" == "up" ]]; then
+            if [[ -n "$hostname" ]]; then
+              printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${GREEN}${host_status}${NC}      " "$hostname"
+            else
+              printf "%-15s  %-${STATUS_PAD}s\n" "$ip" "${GREEN}${host_status}${NC}      "
+            fi
+          else
+            printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${RED}${host_status}${NC}    " "$hostname"
+          fi
+        done <<< "$sorted_results"
+        echo "Found ${live_hosts} hosts in $((end_time-start_time))s"
+        ;;
+    esac
+  fi
+
+  set -m  # Re-enable job control messages
+}
