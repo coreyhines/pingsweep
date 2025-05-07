@@ -18,15 +18,23 @@ A fast, concurrent network ping sweep tool that supports multiple output formats
 ## Installation
 This tool is designed to be used as a function in a zsh shell environment.
 
-1. Clone this repository
-2. Source the script in your zsh configuration:
+1. Copy the function from the pingsweep file directly into your `.zshrc` file:
 
    ```bash
-   # In your .zshrc file
-   source /path/to/pingsweep
+   # Add this to your .zshrc file
+   function pingsweep() {
+     # Paste the entire function here from the pingsweep file
+   }
    ```
 
-3. Restart your shell or run `source ~/.zshrc`
+2. Restart your shell or run `source ~/.zshrc`
+
+Alternatively, you can clone the repository and source the script in your configuration:
+
+```bash
+# In your .zshrc file
+source /path/to/pingsweep
+```
 
 ## Usage
 
