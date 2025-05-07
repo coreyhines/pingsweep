@@ -76,16 +76,75 @@ bash /path/to/pingsweep [options] <CIDR subnet>
 
 ### Examples
 
-# As a zsh function
+#### As a zsh function
 
- ~ » pingsweep 192.168.1.0/24
- ~ » pingsweep -f json 192.168.1.0/24
- ~ » pingsweep -f yaml 192.168.1.0/24
-  
-# Direct bash execution
+##### Text Output (Default)
 
-  bash /path/to/pingsweep 192.168.1.0/24
-  bash /path/to/pingsweep -f yaml 10.0.0.0/24
+```bash
+~ » pingsweep 192.168.1.0/24
+Scanning 192.168.1.0/24...
+192.168.1.1      up          router.local
+192.168.1.5      up          laptop.local
+192.168.1.10     up          desktop.local
+192.168.1.20     down        printer.local
+192.168.1.25     up          
+Found 4 hosts in 3s
+```
+
+##### JSON Output
+
+```bash
+~ » pingsweep -f json 192.168.1.0/24
+Scanning 192.168.1.0/24...
+{
+  "results": [
+    {"ip": "192.168.1.1", "status": "up", "hostname": "router.local"},
+    {"ip": "192.168.1.5", "status": "up", "hostname": "laptop.local"},
+    {"ip": "192.168.1.10", "status": "up", "hostname": "desktop.local"},
+    {"ip": "192.168.1.20", "status": "down", "hostname": "printer.local"},
+    {"ip": "192.168.1.25", "status": "up"}
+  ],
+  "stats": {
+    "total_hosts": 5,
+    "scan_time_seconds": 3
+  }
+}
+```
+
+##### YAML Output
+
+```bash
+~ » pingsweep -f yaml 192.168.1.0/24
+Scanning 192.168.1.0/24...
+results:
+  - ip: 192.168.1.1
+    status: up
+    hostname: router.local
+  - ip: 192.168.1.5
+    status: up
+    hostname: laptop.local
+  - ip: 192.168.1.10
+    status: up
+    hostname: desktop.local
+  - ip: 192.168.1.20
+    status: down
+    hostname: printer.local
+  - ip: 192.168.1.25
+    status: up
+stats:
+  total_hosts: 5
+  scan_time_seconds: 3
+```
+
+#### Direct bash execution
+
+The output formats are identical to the function examples above.
+
+```bash
+bash /path/to/pingsweep 192.168.1.0/24
+bash /path/to/pingsweep -f json 192.168.1.0/24
+bash /path/to/pingsweep -f yaml 192.168.1.0/24
+```
 
 ## Installing prips
 
