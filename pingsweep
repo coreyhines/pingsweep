@@ -15,6 +15,7 @@ pingsweep() {
 
   local format="text"
   local subnet=""
+  local filter=""
 
   # Parse command line arguments
   while [[ $# -gt 0 ]]; do
@@ -23,13 +24,20 @@ pingsweep() {
         format="$2"
         shift 2
         ;;
+      -s|--search)
+        filter="$2"
+        shift 2
+        ;;
       -h|--help)
         echo "Usage: pingsweep [options] <CIDR subnet>"
         echo "Options:"
         echo "  -f, --format FORMAT    Output format: text (default), json, or yaml"
+        echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
         echo "  -h, --help            Show this help message"
         echo "Example: pingsweep 192.168.1.0/24"
         echo "         pingsweep -f json 192.168.1.0/24"
+        echo "         pingsweep -s 'router*' 192.168.1.0/24"
+        echo "         pingsweep --search 're:^192\\.168\\.1\\.[0-9]+ up' 192.168.1.0/24"
         return 0
         ;;
       *)
@@ -98,14 +106,29 @@ pingsweep() {
   # Process and display results
   if [ -s "$results_file" ]; then
     local sorted_results=$(sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$results_file")
-    live_hosts=$(wc -l < "$results_file" | tr -d ' ')
-    
+    # Apply filtering if requested
+    local filtered_results="$sorted_results"
+    if [[ -n "$filter" ]]; then
+      if [[ "$filter" == re:* ]]; then
+        # Regex filter (strip 're:' prefix)
+        local regex="${filter#re:}"
+        filtered_results=$(echo "$sorted_results" | grep -E "$regex")
+      elif [[ "$filter" == *'*'* || "$filter" == *'?'* ]]; then
+        # Wildcard filter (convert to shell pattern)
+        filtered_results=$(echo "$sorted_results" | grep -E "^$(echo "$filter" | sed 's/\*/.*/g; s/\?/./g')")
+      else
+        # Substring filter
+        filtered_results=$(echo "$sorted_results" | grep -- "$filter")
+      fi
+    fi
+    live_hosts=$(echo "$filtered_results" | grep -c '^' || echo 0)
     case "$format" in
       "json")
         echo "{"
         echo "  \"results\": ["
         local first=true
         while IFS= read -r line; do
+          [[ -z "$line" ]] && continue
           if [[ "$first" != true ]]; then
             echo ","
           fi
@@ -120,7 +143,7 @@ pingsweep() {
           else
             printf '    {"ip": "%s", "status": "%s"}' "$ip" "$host_status"
           fi
-        done <<< "$sorted_results"
+        done <<< "$filtered_results"
         echo
         echo "  ],"
         echo "  \"stats\": {"
@@ -129,10 +152,10 @@ pingsweep() {
         echo "  }"
         echo "}"
         ;;
-        
       "yaml")
         echo "results:"
         while IFS= read -r line; do
+          [[ -z "$line" ]] && continue
           # Split line into fields
           ip=$(echo "$line" | cut -d' ' -f1)
           host_status=$(echo "$line" | cut -d' ' -f2)
@@ -143,14 +166,14 @@ pingsweep() {
           else
             printf '  - ip: %s\n    status: %s\n' "$ip" "$host_status"
           fi
-        done <<< "$sorted_results"
+        done <<< "$filtered_results"
         echo "stats:"
         printf '  total_hosts: %d\n' "$live_hosts"
         printf '  scan_time_seconds: %d\n' "$((end_time-start_time))"
         ;;
-        
       *)  # text format (default)
         while IFS= read -r line; do
+          [[ -z "$line" ]] && continue
           ip=$(echo "$line" | cut -d' ' -f1)
           host_status=$(echo "$line" | cut -d' ' -f2)
           hostname=$(echo "$line" | cut -d' ' -f3- -s)
@@ -163,7 +186,7 @@ pingsweep() {
           else
             printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${RED}${host_status}${NC}    " "$hostname"
           fi
-        done <<< "$sorted_results"
+        done <<< "$filtered_results"
         echo "Found ${live_hosts} hosts in $((end_time-start_time))s"
         ;;
     esac
