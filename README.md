@@ -18,6 +18,10 @@ A fast, concurrent network ping sweep tool that supports multiple output formats
 ## Installation
 This tool is designed to be used as a function in a zsh shell environment.
 
+### Upgrade Safety
+
+The installer will check if you already have a `pingsweep()` function in your `.zshrc`. If so, it will compare the actual function code with the new version. If they differ, you'll be shown a diff and prompted (default: yes) to replace the function. This ensures you always have the latest version, and prevents accidental overwrites.
+
 ### Automatic Installation
 
 Use the provided installation script:
@@ -72,6 +76,7 @@ bash /path/to/pingsweep [options] <CIDR subnet>
 ### Options
 
   -f, --format FORMAT    Output format: text (default), json, or yaml
+  -s, --search SEARCH     Search/filter output (supports substring, wildcards, or regex with re: prefix)
 
   -h, --help            Show this help message
 
@@ -91,6 +96,17 @@ Scanning 192.168.1.0/24...
 192.168.1.25     up          
 Found 5 hosts in 3s
 ```
+
+##### Filtering Output
+
+You can filter results using the `--search` or `-s` option. This supports substring, wildcard (using `*` or `?`), or regular expression (prefix with `re:`):
+
+```bash
+~ » pingsweep -s 'router*' 192.168.1.0/24
+~ » pingsweep --search 're:^192\\.168\\.1\\.[0-9]+ up' 192.168.1.0/24
+```
+
+> The `--search`/`-s` option allows you to filter results by substring, wildcard, or regex. Wildcards use shell-style patterns. Regex must be prefixed with `re:`.
 
 ##### JSON Output
 
