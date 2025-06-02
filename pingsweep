@@ -104,7 +104,7 @@ pingsweep() {
 
     # Calculate end time before processing results
     local end_time=$(date +%s)
-    
+
     # Process and display results
     if [ -s "$results_file" ]; then
       local sorted_results=$(sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$results_file")
@@ -188,7 +188,7 @@ pingsweep() {
             else
               printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${RED}${host_status}${NC}    " "$hostname"
             fi
-          done <<< "$filtered_results" 
+          done <<< "$filtered_results"
           echo "Found ${live_hosts} hosts in $((end_time-start_time))s"
           ;;
       esac
