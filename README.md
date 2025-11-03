@@ -15,6 +15,13 @@ A fast, concurrent network ping sweep tool that supports multiple output formats
 - `ping` - Network ping utility (standard on most systems)
 - `dig` - DNS lookup utility (standard on most systems)
 
+## Performance Notes
+
+- **Shell-specific concurrency**: Default concurrency is 255 jobs for bash, 50 jobs for zsh
+- **zsh limitation**: Due to zsh's internal job table limits, very large subnets (/20 and larger) may show occasional "job table full" warnings in zsh, though scans complete successfully
+- **Performance**: Typical /24 subnet scans complete in ~1.5-2 seconds
+- **Tuning**: Use `-j` flag to adjust concurrency for your environment (e.g., `-j 100` for higher throughput)
+
 ## Installation
 This tool is designed to be used as a function in a zsh shell environment.
 
@@ -76,8 +83,8 @@ bash /path/to/pingsweep [options] <CIDR subnet>
 ### Options
 
   -f, --format FORMAT    Output format: text (default), json, or yaml
-  -s, --search SEARCH     Search/filter output (supports substring, wildcards, or regex with re: prefix)
-
+  -j, --jobs JOBS        Max concurrent jobs (default: 50 for zsh, 255 for bash)
+  -s, --search SEARCH    Search/filter output (supports substring, wildcards, or regex with re: prefix)
   -h, --help            Show this help message
 
 ### Examples
