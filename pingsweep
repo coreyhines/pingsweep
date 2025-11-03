@@ -37,7 +37,7 @@ check_requirements
 dns_lookup() {
   # Only attempt DNS lookup if dig is available
   if command -v dig >/dev/null 2>&1; then
-    dig +time=1 +tries=1 +short -x "$1" 2>/dev/null | sed 's/\.$//'
+    dig +time=$dns_timeout +tries=1 +short -x "$1" 2>/dev/null | sed 's/\.$//'
   fi
 }
 
@@ -57,9 +57,15 @@ show_progress() {
 # Default concurrency level (bash can handle more than zsh)
 max_jobs=255
 
+# Default timeout values (in seconds)
+ping_timeout=1
+dns_timeout=1
+
 format="text"
 subnet=""
 filter=""
+quiet=false
+dry_run=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -72,6 +78,19 @@ while [[ $# -gt 0 ]]; do
       max_jobs="$2"
       shift 2
       ;;
+    -t|--timeout)
+      ping_timeout="$2"
+      dns_timeout="$2"
+      shift 2
+      ;;
+    -q|--quiet)
+      quiet=true
+      shift
+      ;;
+    -n|--dry-run)
+      dry_run=true
+      shift
+      ;;
     -s|--search)
       filter="$2"
       shift 2
@@ -79,8 +98,11 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: pingsweep [options] <CIDR subnet>"
       echo "Options:"
-      echo "  -f, --format FORMAT    Output format: text (default), json, or yaml"
+      echo "  -f, --format FORMAT    Output format: text (default), json, yaml, or csv"
       echo "  -j, --jobs JOBS        Max concurrent jobs (default: 255)"
+      echo "  -t, --timeout SECONDS  Timeout for ping/DNS queries (default: 1)"
+      echo "  -q, --quiet            Quiet mode - suppress progress output"
+      echo "  -n, --dry-run          Show IPs that would be scanned without scanning"
       echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
       echo "  -h, --help            Show this help message"
       echo "Example: pingsweep 192.168.1.0/24"
@@ -98,8 +120,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate format
-if [[ "$format" != "text" && "$format" != "json" && "$format" != "yaml" ]]; then
-  echo "Error: Invalid format. Supported formats are: text, json, yaml"
+if [[ "$format" != "text" && "$format" != "json" && "$format" != "yaml" && "$format" != "csv" ]]; then
+  echo "Error: Invalid format. Supported formats are: text, json, yaml, csv"
   exit 1
 fi
 
@@ -195,15 +217,15 @@ else
 fi
 
 show_progress=false
-if [ "$total_ips" -gt 256 ]; then
+if [ "$total_ips" -gt 256 ] && [ "$quiet" = false ]; then
   show_progress=true
 fi
 
-if [[ "$format" == "text" ]]; then
+if [[ "$format" == "text" ]] && [ "$quiet" = false ]; then
   if [ "$show_progress" = true ]; then
-    echo "Scanning $subnet ($total_ips IPs)..."
+    echo "Scanning $subnet ($total_ips IPs)..." >&2
   else
-    echo "Scanning $subnet..."
+    echo "Scanning $subnet..." >&2
   fi
 fi
 
@@ -229,17 +251,36 @@ else
   generate_ips "$subnet" "$results_file.ips"
 fi
 
+# If dry-run mode, just display IPs and exit
+if [ "$dry_run" = true ]; then
+  echo "Dry-run mode: IPs that would be scanned:"
+  cat "$results_file.ips"
+  echo
+  echo "Total: $total_ips IPs"
+  exit 0
+fi
+
 GREEN=$'\033[0;32m'
 RED=$'\033[0;31m'
 NC=$'\033[0m'  # No Color
 STATUS_PAD=12  # Padding for status column
+
+# Detect if output is to a terminal (disable colors if piped)
+if [ -t 1 ]; then
+  USE_COLOR=true
+else
+  USE_COLOR=false
+  GREEN=""
+  RED=""
+  NC=""
+fi
 
 # Process IPs with batched concurrency (inline blocks to avoid job table overflow)
 while IFS= read -r ip; do
   # Launch scan in background using inline block (more efficient than function call)
   {
     hostname=$(dns_lookup "$ip")
-    if ping -c1 -W1 "$ip" >/dev/null 2>&1; then
+    if ping -c1 -W$ping_timeout "$ip" >/dev/null 2>&1; then
       if [[ -n "$hostname" ]]; then
         echo "$ip up $hostname" >> "$results_file"
       else
@@ -311,6 +352,22 @@ if [ -s "$results_file" ]; then
   fi
   live_hosts=$(echo "$filtered_results" | grep -c '^' || echo 0)
   case "$format" in
+    "csv")
+      echo "IP,Status,Hostname"
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        ip=$(echo "$line" | cut -d' ' -f1)
+        host_status=$(echo "$line" | cut -d' ' -f2)
+        hostname=$(echo "$line" | cut -d' ' -f3- -s)
+        # Escape quotes in hostname for CSV
+        hostname=$(echo "$hostname" | sed 's/"/""/g')
+        if [[ -n "$hostname" ]]; then
+          echo "$ip,$host_status,\"$hostname\""
+        else
+          echo "$ip,$host_status,"
+        fi
+      done <<< "$filtered_results"
+      ;;
     "json")
       echo "{"
       echo "  \"results\": ["
@@ -375,8 +432,10 @@ if [ -s "$results_file" ]; then
           printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${RED}${host_status}${NC}    " "$hostname"
         fi
       done <<< "$filtered_results"
-      echo
-      echo "Found ${live_hosts} hosts in $((end_time-start_time))s"
+      if [ "$quiet" = false ]; then
+        echo
+        echo "Found ${live_hosts} hosts in $((end_time-start_time))s"
+      fi
       ;;
   esac
 fi
