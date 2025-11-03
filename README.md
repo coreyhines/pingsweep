@@ -5,15 +5,20 @@ A fast, concurrent network ping sweep tool that supports multiple output formats
 ## Features
 - Concurrent host scanning for speed
 - DNS resolution for discovered hosts
-- Multiple output formats (text, JSON, YAML)
-- Color-coded output in text mode
+- Multiple output formats (text, JSON, YAML, CSV)
+- Color-coded output in text mode (auto-disabled when piped)
 - Support for CIDR notation
 - Built-in IP range generation (no external dependencies)
+- Search/filter results with substring, wildcards, or regex
+- Quiet mode for scripting and non-interactive use
+- Dry-run mode to preview IP ranges
+- Configurable timeouts and concurrency
 
 ## Requirements
 
-- `ping` - Network ping utility (standard on most systems)
-- `dig` - DNS lookup utility (standard on most systems)
+- `ping` - Network ping utility (required)
+- `dig` - DNS lookup utility (optional - DNS resolution skipped if not available)
+- `date` - Date utility (required for timing)
 
 ## Performance Notes
 
@@ -23,13 +28,8 @@ A fast, concurrent network ping sweep tool that supports multiple output formats
 - **Tuning**: Use `-j` flag to adjust concurrency for your environment
 
 ## Installation
-This tool is designed to be used as a function in a zsh shell environment.
 
-### Upgrade Safety
-
-The installer will check if you already have a `pingsweep()` function in your `.zshrc`. If so, it will compare the actual function code with the new version. If they differ, you'll be shown a diff and prompted (default: yes) to replace the function. This ensures you always have the latest version, and prevents accidental overwrites.
-
-### Automatic Installation
+### Automatic Installation (Recommended)
 
 Use the provided installation script:
 
@@ -42,56 +42,60 @@ cd pingsweep
 ./install_pingsweep.sh
 ```
 
-The script will check if the function already exists in your `.zshrc` file and append it if not present.
+The installer will:
+1. Install the standalone bash script to `~/.local/bin/pingsweep`
+2. Create a lightweight zsh wrapper function in `~/.zshfunc`
+3. Update your `.zshrc` to source the function (with guards to prevent duplicate sourcing)
+4. Back up your `.zshrc` before making changes
+
+This approach ensures optimal performance by running the script in bash (avoiding zsh job table limitations) while maintaining seamless zsh integration.
 
 ### Manual Installation
 
-You can manually add the function to your shell configuration:
+You can install manually if needed:
 
-1. Copy the function from the pingsweep file directly into your `.zshrc` file:
-
+1. Copy the script to your local bin directory:
    ```bash
-   # Add this to your .zshrc file
+   mkdir -p ~/.local/bin
+   cp pingsweep ~/.local/bin/pingsweep
+   chmod +x ~/.local/bin/pingsweep
+   ```
+
+2. Add the wrapper function to your `~/.zshrc`:
+   ```bash
    pingsweep() {
-     # Paste the entire function here from the pingsweep file
+     "$HOME/.local/bin/pingsweep" "$@"
    }
    ```
 
-2. Restart your shell or run `source ~/.zshrc`
+3. Ensure `~/.local/bin` is in your PATH:
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
 
-Alternatively, you can source the script in your configuration:
-
-```bash
-# In your .zshrc file
-source /path/to/pingsweep
-```
+4. Restart your shell or run `source ~/.zshrc`
 
 ## Usage
 
-When sourced as a function:
-
-```zsh
-pingsweep [options] <CIDR subnet>
-```
-
-If not sourced, you can run it directly with bash:
-
 ```bash
-bash /path/to/pingsweep [options] <CIDR subnet>
+pingsweep [options] <CIDR subnet>
 ```
 
 ### Options
 
-  -f, --format FORMAT    Output format: text (default), json, or yaml
-  -j, --jobs JOBS        Max concurrent jobs (default: 50 for zsh, 255 for bash)
+```
+  -f, --format FORMAT    Output format: text (default), json, yaml, or csv
+  -j, --jobs JOBS        Max concurrent jobs (default: 255)
+  -t, --timeout SECONDS  Timeout for ping/DNS queries (default: 1)
+  -q, --quiet            Quiet mode - suppress progress output
+  -n, --dry-run          Show IPs that would be scanned without scanning
   -s, --search SEARCH    Search/filter output (supports substring, wildcards, or regex with re: prefix)
-  -h, --help            Show this help message
+  -h, --help             Show this help message
+```
 
 ### Examples
 
-#### As a zsh function
-
-##### Text Output (Default)
+#### Text Output (Default)
 
 ```bash
 ~ » pingsweep 192.168.1.0/24
@@ -104,18 +108,7 @@ Scanning 192.168.1.0/24...
 Found 5 hosts in 3s
 ```
 
-##### Filtering Output
-
-You can filter results using the `--search` or `-s` option. This supports substring, wildcard (using `*` or `?`), or regular expression (prefix with `re:`):
-
-```bash
-~ » pingsweep -s 'router*' 192.168.1.0/24
-~ » pingsweep --search 're:^192\\.168\\.1\\.[0-9]+ up' 192.168.1.0/24
-```
-
-> The `--search`/`-s` option allows you to filter results by substring, wildcard, or regex. Wildcards use shell-style patterns. Regex must be prefixed with `re:`.
-
-##### JSON Output
+#### JSON Output
 
 ```bash
 ~ » pingsweep -f json 192.168.1.0/24
@@ -135,7 +128,7 @@ Scanning 192.168.1.0/24...
 }
 ```
 
-##### YAML Output
+#### YAML Output
 
 ```bash
 ~ » pingsweep -f yaml 192.168.1.0/24
@@ -160,12 +153,69 @@ stats:
   scan_time_seconds: 3
 ```
 
-#### Direct bash execution
-
-The output formats are identical to the function examples above.
+#### CSV Output
 
 ```bash
-bash /path/to/pingsweep 192.168.1.0/24
-bash /path/to/pingsweep -f json 192.168.1.0/24
-bash /path/to/pingsweep -f yaml 192.168.1.0/24
+~ » pingsweep -f csv 192.168.1.0/24
+IP,Status,Hostname
+192.168.1.1,up,"router.local"
+192.168.1.5,up,"laptop.local"
+192.168.1.10,up,"desktop.local"
+192.168.1.20,down,"printer.local"
+192.168.1.25,up,
+```
+
+#### Filtering Output
+
+Filter results using the `--search` or `-s` option with substring, wildcard, or regex:
+
+```bash
+# Substring match
+~ » pingsweep -s 'router' 192.168.1.0/24
+
+# Wildcard match
+~ » pingsweep -s 'router*' 192.168.1.0/24
+
+# Regex match (prefix with 're:')
+~ » pingsweep --search 're:^192\\.168\\.1\\.[0-9]+ up' 192.168.1.0/24
+```
+
+#### Quiet Mode for Scripting
+
+```bash
+# Suppress progress messages and summary
+~ » pingsweep -q 192.168.1.0/24
+192.168.1.1      up          router.local
+192.168.1.5      up          laptop.local
+
+# Perfect for piping to other tools
+~ » pingsweep -q -f json 192.168.1.0/24 | jq '.results[] | select(.status=="up")'
+```
+
+#### Dry Run
+
+```bash
+# Preview IPs without scanning
+~ » pingsweep -n 192.168.1.0/29
+Dry-run mode: IPs that would be scanned:
+192.168.1.0
+192.168.1.1
+192.168.1.2
+192.168.1.3
+192.168.1.4
+192.168.1.5
+192.168.1.6
+192.168.1.7
+
+Total: 8 IPs
+```
+
+#### Custom Timeout and Concurrency
+
+```bash
+# Faster scan with shorter timeout
+~ » pingsweep -t 0.5 -j 500 192.168.1.0/24
+
+# More conservative for slower networks
+~ » pingsweep -t 3 -j 50 192.168.1.0/24
 ```
