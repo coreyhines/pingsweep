@@ -191,7 +191,10 @@ trap "rm -f '$results_file' '$results_file.ips'" EXIT # Ensure temp files are cl
 
 # Generate IP list - use prips if available, otherwise use built-in generator
 if [ "$use_prips" = true ]; then
-  prips "$subnet" > "$results_file.ips"
+  if ! prips "$subnet" > "$results_file.ips" 2>/dev/null; then
+    # prips failed (e.g., invalid network boundary), fall back to built-in
+    generate_ips "$subnet" "$results_file.ips"
+  fi
 else
   generate_ips "$subnet" "$results_file.ips"
 fi
