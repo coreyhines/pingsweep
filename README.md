@@ -8,12 +8,12 @@ A fast, concurrent network ping sweep tool that supports multiple output formats
 - Multiple output formats (text, JSON, YAML)
 - Color-coded output in text mode
 - Support for CIDR notation
+- Built-in IP range generation (no external dependencies)
 
 ## Requirements
 
-- `prips` - IP address expansion tool ([installation instructions](#installing-prips))
-- `ping` - Network ping utility
-- `dig` - DNS lookup utility
+- `ping` - Network ping utility (standard on most systems)
+- `dig` - DNS lookup utility (standard on most systems)
 
 ## Installation
 This tool is designed to be used as a function in a zsh shell environment.
@@ -161,30 +161,4 @@ The output formats are identical to the function examples above.
 bash /path/to/pingsweep 192.168.1.0/24
 bash /path/to/pingsweep -f json 192.168.1.0/24
 bash /path/to/pingsweep -f yaml 192.168.1.0/24
-```
-
-## Installing prips
-
-### macOS
-
-```bash
-brew install prips
-```
-
-### Debian/Ubuntu (APT-based)
-
-```bash
-sudo apt-get update
-sudo apt-get install prips
-```
-
-### RHEL/CentOS/Fedora (RPM-based)
-
-```bash
-# For Fedora
-sudo dnf install prips
-
-# For RHEL/CentOS
-sudo yum install epel-release
-sudo yum install prips
 ```

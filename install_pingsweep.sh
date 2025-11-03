@@ -48,7 +48,12 @@ if [ ! -f "$ZSHFUNC" ]; then
     touch "$ZSHFUNC"
 fi
 awk '/^pingsweep\(\)/ {in_func=1; brace=0} in_func {brace+=gsub(/{/,"{"); brace-=gsub(/}/,"}"); if (brace<=0 && /}/) {in_func=0; next} next} {print}' "$ZSHFUNC" > "$ZSHFUNC.tmp" && mv "$ZSHFUNC.tmp" "$ZSHFUNC"
-cat "$PINGSWEEP_PATH" >> "$ZSHFUNC"
+
+# Create the pingsweep function by wrapping the script content
+echo "pingsweep() {" >> "$ZSHFUNC"
+# Skip the shebang line when copying the script content
+tail -n +2 "$PINGSWEEP_PATH" >> "$ZSHFUNC"
+echo "}" >> "$ZSHFUNC"
 chmod 600 "$ZSHFUNC"
 
 # Add guarded sourcing of .zshfunc to ZSHRC

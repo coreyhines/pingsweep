@@ -1,197 +1,337 @@
-pingsweep() {
-  (
-    unsetopt MONITOR
-    set +m
-    # Check if prips is installed and install it if not
-    if ! command -v prips >/dev/null 2>&1; then
-      echo "Error: prips is not installed."
-      if [[ "$OSTYPE" == "darwin"* ]]; then # macOS
-        echo "Install it with: brew install prips"
-      elif command -v apt-get >/dev/null 2>&1; then # Debian/Ubuntu
-        echo "Install it with: sudo apt-get install prips"
-      elif command -v yum >/dev/null 2>&1; then # CentOS/RHEL
-        echo "Install it with: sudo yum install prips"
-      # Add other package managers if needed
-      fi
-      return 1
-    fi
+#!/bin/bash
 
-    local format="text"
-    local subnet=""
-    local filter=""
+# Disable job control to prevent job messages
+set +m
+if [[ -n "$ZSH_VERSION" ]]; then
+  unsetopt MONITOR
+fi
 
-    # Parse command line arguments
-    while [[ $# -gt 0 ]]; do
-      case $1 in
-        -f|--format)
-          format="$2"
-          shift 2
-          ;;
-        -s|--search)
-          filter="$2"
-          shift 2
-          ;;
-        -h|--help)
-          echo "Usage: pingsweep [options] <CIDR subnet>"
-          echo "Options:"
-          echo "  -f, --format FORMAT    Output format: text (default), json, or yaml"
-          echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
-          echo "  -h, --help            Show this help message"
-          echo "Example: pingsweep 192.168.1.0/24"
-          echo "         pingsweep -f json 192.168.1.0/24"
-          echo "         pingsweep -s 'router*' 192.168.1.0/24"
-          echo "         pingsweep --search 're:^192\\.168\\.1\\.[0-9]+ up' 192.168.1.0/24"
-          return 0
-          ;;
-        *)
-          subnet="$1"
-          shift
-          ;;
-      esac
-    done
-
-    # Validate format
-    if [[ "$format" != "text" && "$format" != "json" && "$format" != "yaml" ]]; then
-      echo "Error: Invalid format. Supported formats are: text, json, yaml"
-      return 1
-    fi
-
-    # Check if subnet is provided
-    if [ -z "$subnet" ]; then
-      echo "Error: CIDR subnet is required"
-      echo "Use -h or --help for usage information"
-      return 1
-    fi
-    echo "Scanning $subnet..."
-    local max_jobs=255 # Number of concurrent pings
-    local count=0
-    local start_time=$(date +%s)
-    local live_hosts=0
-
-    # Use a subshell for backgrounding and collecting results to sort later
-    # This avoids issues with `wait` inside a pipeline if not careful
-    # and ensures `sort` gets all data.
-    local results_file=$(mktemp)
-    trap "rm -f $results_file" EXIT # Ensure temp file is cleaned up
-
-    local GREEN=$'\033[0;32m'
-    local RED=$'\033[0;31m'
-    local NC=$'\033[0m'  # No Color
-    local STATUS_PAD=12  # Padding for status column
-
-    exec 3>&2 2>/dev/null  # Save stderr and redirect it to null
-    while IFS= read -r ip; do
-      {
-        hostname=$(dig +time=1 +tries=1 +short -x "$ip" 2>/dev/null | sed 's/\.$//')
-        if ping -c1 -W1 "$ip" >/dev/null 2>&1; then
-          if [[ -n "$hostname" ]]; then
-            echo "$ip up $hostname" >> "$results_file"
-          else
-            echo "$ip up" >> "$results_file"
-          fi
-        elif [[ -n "$hostname" ]]; then
-          echo "$ip down $hostname" >> "$results_file"
-        fi
-      } >> "$results_file" &
-      ((count++))
-      if (( count % max_jobs == 0 )); then
-        wait
-      fi
-    done < <(prips "$subnet")
-
-    wait
-    exec 2>&3  # Restore stderr
-
-    # Calculate end time before processing results
-    local end_time=$(date +%s)
-
-    # Process and display results
-    if [ -s "$results_file" ]; then
-      local sorted_results=$(sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$results_file")
-      # Apply filtering if requested
-      local filtered_results="$sorted_results"
-      if [[ -n "$filter" ]]; then
-        if [[ "$filter" == re:* ]]; then
-          # Regex filter (strip 're:' prefix)
-          local regex="${filter#re:}"
-          filtered_results=$(echo "$sorted_results" | grep -E "$regex")
-        elif [[ "$filter" == *'*'* || "$filter" == *'?'* ]]; then
-          # Wildcard filter (convert to shell pattern)
-          filtered_results=$(echo "$sorted_results" | grep -E "^$(echo "$filter" | sed 's/\*/.*/g; s/\?/./g')")
-        else
-          # Substring filter
-          filtered_results=$(echo "$sorted_results" | grep -- "$filter")
-        fi
-      fi
-      live_hosts=$(echo "$filtered_results" | grep -c '^' || echo 0)
-      case "$format" in
-        "json")
-          echo "{"
-          echo "  \"results\": ["
-          local first=true
-          while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            if [[ "$first" != true ]]; then
-              echo ","
-            fi
-            first=false
-            # Split line into fields
-            ip=$(echo "$line" | cut -d' ' -f1)
-            host_status=$(echo "$line" | cut -d' ' -f2)
-            hostname=$(echo "$line" | cut -d' ' -f3- -s)
-            if [[ -n "$hostname" ]]; then
-              printf '    {"ip": "%s", "status": "%s", "hostname": "%s"}' \
-                "$ip" "$host_status" "$hostname"
-            else
-              printf '    {"ip": "%s", "status": "%s"}' "$ip" "$host_status"
-            fi
-          done <<< "$filtered_results"
-          echo
-          echo "  ],"
-          echo "  \"stats\": {"
-          printf '    "total_hosts": %d,\n' "$live_hosts"
-          printf '    "scan_time_seconds": %d\n' "$((end_time-start_time))"
-          echo "  }"
-          echo "}"
-          ;;
-        "yaml")
-          echo "results:"
-          while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            # Split line into fields
-            ip=$(echo "$line" | cut -d' ' -f1)
-            host_status=$(echo "$line" | cut -d' ' -f2)
-            hostname=$(echo "$line" | cut -d' ' -f3- -s)
-            if [[ -n "$hostname" ]]; then
-              printf '  - ip: %s\n    status: %s\n    hostname: %s\n' \
-                "$ip" "$host_status" "$hostname"
-            else
-              printf '  - ip: %s\n    status: %s\n' "$ip" "$host_status"
-            fi
-          done <<< "$filtered_results"
-          echo "stats:"
-          printf '  total_hosts: %d\n' "$live_hosts"
-          printf '  scan_time_seconds: %d\n' "$((end_time-start_time))"
-          ;;
-        *)  # text format (default)
-          while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            ip=$(echo "$line" | cut -d' ' -f1)
-            host_status=$(echo "$line" | cut -d' ' -f2)
-            hostname=$(echo "$line" | cut -d' ' -f3- -s)
-            if [[ "$host_status" == "up" ]]; then
-              if [[ -n "$hostname" ]]; then
-                printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${GREEN}${host_status}${NC}      " "$hostname"
-              else
-                printf "%-15s  %-${STATUS_PAD}s\n" "$ip" "${GREEN}${host_status}${NC}      "
-              fi
-            else
-              printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${RED}${host_status}${NC}    " "$hostname"
-            fi
-          done <<< "$filtered_results"
-          echo "Found ${live_hosts} hosts in $((end_time-start_time))s"
-          ;;
-      esac
-    fi
-  ) 2>/dev/null
+# Function to perform DNS lookup with stderr redirection
+dns_lookup() {
+  dig +time=1 +tries=1 +short -x "$1" 2>/dev/null | sed 's/\.$//'
 }
+
+# Progress spinner function
+show_progress() {
+  local current_block="$1"
+  local progress="$2"
+  local spinner_chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+  local spinner_index=$((progress % 10))
+  local spinner_char="${spinner_chars:$spinner_index:1}"
+  
+  printf "\r%s Scanning %s... (%d%%)" "$spinner_char" "$current_block" "$progress" >&2
+}
+
+# No external dependencies required - uses built-in IP generation
+
+# Default concurrency level
+max_jobs=50
+
+format="text"
+subnet=""
+filter=""
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -f|--format)
+      format="$2"
+      shift 2
+      ;;
+    -j|--jobs)
+      max_jobs="$2"
+      shift 2
+      ;;
+    -s|--search)
+      filter="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: pingsweep [options] <CIDR subnet>"
+      echo "Options:"
+      echo "  -f, --format FORMAT    Output format: text (default), json, or yaml"
+      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 50)"
+      echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
+      echo "  -h, --help            Show this help message"
+      echo "Example: pingsweep 192.168.1.0/24"
+      echo "         pingsweep -f json 192.168.1.0/24"
+      echo "         pingsweep -j 100 192.168.1.0/24"
+      echo "         pingsweep -s 'router*' 192.168.1.0/24"
+      echo "         pingsweep --search 're:^192\\.168\\.1\\.[0-9]+ up' 192.168.1.0/24"
+      exit 0
+      ;;
+    *)
+      subnet="$1"
+      shift
+      ;;
+  esac
+done
+
+# Validate format
+if [[ "$format" != "text" && "$format" != "json" && "$format" != "yaml" ]]; then
+  echo "Error: Invalid format. Supported formats are: text, json, yaml"
+  exit 1
+fi
+
+# Check if subnet is provided
+if [ -z "$subnet" ]; then
+  echo "Error: CIDR subnet is required"
+  echo "Use -h or --help for usage information"
+  exit 1
+fi
+
+# Comprehensive IP range generator that replicates most prips functionality
+generate_ips() {
+  local subnet="$1"
+  local output_file="$2"
+  
+  # Validate CIDR format
+  if [[ ! "$subnet" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+    echo "Error: Invalid CIDR format: $subnet" >&2
+    return 1
+  fi
+  
+  # Parse CIDR notation
+  local ip_part=$(echo "$subnet" | cut -d'/' -f1)
+  local cidr=$(echo "$subnet" | cut -d'/' -f2)
+  
+  # Validate CIDR range
+  if (( cidr < 0 || cidr > 32 )); then
+    echo "Error: CIDR must be between 0 and 32: $cidr" >&2
+    return 1
+  fi
+  
+  # Parse IP address and validate each octet
+  local ip1=$(echo "$ip_part" | cut -d'.' -f1)
+  local ip2=$(echo "$ip_part" | cut -d'.' -f2)
+  local ip3=$(echo "$ip_part" | cut -d'.' -f3)
+  local ip4=$(echo "$ip_part" | cut -d'.' -f4)
+  
+  # Validate IP octets
+  for octet in "$ip1" "$ip2" "$ip3" "$ip4"; do
+    if (( octet < 0 || octet > 255 )); then
+      echo "Error: Invalid IP octet: $octet" >&2
+      return 1
+    fi
+  done
+  
+  # Convert IP to decimal
+  local base_ip=$((ip1 * 256 * 256 * 256 + ip2 * 256 * 256 + ip3 * 256 + ip4))
+  
+  # Calculate network address and number of hosts
+  local host_bits=$((32 - cidr))
+  local num_hosts=$((2 ** host_bits))
+  
+  # Handle special case of /32 (single IP)
+  if (( cidr == 32 )); then
+    echo "$ip_part" > "$output_file"
+    return 0
+  fi
+  
+  # Handle very large subnets (warn but don't fail)
+  if (( num_hosts > 65536 )); then
+    echo "Warning: Large subnet with $num_hosts IPs, this may take a while..." >&2
+  fi
+  
+  # Generate IPs efficiently
+  {
+    for ((i=0; i<num_hosts; i++)); do
+      local current_ip=$((base_ip + i))
+      local octet1=$((current_ip / (256 * 256 * 256)))
+      local octet2=$(((current_ip % (256 * 256 * 256)) / (256 * 256)))
+      local octet3=$(((current_ip % (256 * 256)) / 256))
+      local octet4=$((current_ip % 256))
+      echo "$octet1.$octet2.$octet3.$octet4"
+    done
+  } > "$output_file"
+  
+  return 0
+}
+
+# Calculate total IPs and determine if we need progress indicator
+# Use our custom IP generation function (no external dependencies)
+
+# Calculate total IPs using our custom function
+temp_ip_file=$(mktemp)
+generate_ips "$subnet" "$temp_ip_file"
+total_ips=$(wc -l < "$temp_ip_file")
+rm -f "$temp_ip_file"
+show_progress=false
+if [ "$total_ips" -gt 256 ]; then
+  show_progress=true
+fi
+
+if [[ "$format" == "text" ]]; then
+  if [ "$show_progress" = true ]; then
+    echo "Scanning $subnet ($total_ips IPs)..."
+  else
+    echo "Scanning $subnet..."
+  fi
+fi
+
+count=0
+start_time=$(date +%s)
+live_hosts=0
+
+# Progress tracking variables
+current_24_block=""
+last_24_block=""
+
+# Use a temporary file to avoid process substitution issues
+results_file=$(mktemp)
+trap "rm -f '$results_file' '$results_file.ips'" EXIT # Ensure temp files are cleaned up
+
+# Generate IP list using our custom function
+generate_ips "$subnet" "$results_file.ips"
+
+GREEN=$'\033[0;32m'
+RED=$'\033[0;31m'
+NC=$'\033[0m'  # No Color
+STATUS_PAD=12  # Padding for status column
+
+# Function to scan a single IP
+scan_ip() {
+  local ip="$1"
+  local results_file="$2"
+  
+  local hostname=$(dns_lookup "$ip")
+  if ping -c1 -W1 "$ip" >/dev/null 2>&1; then
+    if [[ -n "$hostname" ]]; then
+      echo "$ip up $hostname" >> "$results_file"
+    else
+      echo "$ip up" >> "$results_file"
+    fi
+  elif [[ -n "$hostname" ]]; then
+    echo "$ip down $hostname" >> "$results_file"
+  fi
+}
+
+# Process IPs with controlled concurrency
+while IFS= read -r ip; do
+  # Wait for a slot if we've hit max_jobs
+  while [ $(jobs -r | wc -l) -ge $max_jobs ]; do
+    sleep 0.1
+  done
+  
+  # Launch scan in background
+  scan_ip "$ip" "$results_file" &
+  
+  ((count++))
+
+  # Update progress for large subnets
+  if [ "$show_progress" = true ] && [[ "$format" == "text" ]]; then
+    # Extract /24 block from IP (first 3 octets)
+    current_24_block=$(echo "$ip" | cut -d. -f1-3).0/24
+
+    # Show progress when /24 block changes or every 50 IPs
+    if [ "$current_24_block" != "$last_24_block" ] || (( count % 50 == 0 )); then
+      progress_percent=$(( (count * 100) / total_ips ))
+      show_progress "$current_24_block" "$progress_percent"
+      last_24_block="$current_24_block"
+    fi
+  fi
+done < "$results_file.ips"
+
+# Wait for all background jobs to complete
+wait
+
+# Clean up IP list file
+rm -f "$results_file.ips"
+
+# Clear progress line if we were showing progress
+if [ "$show_progress" = true ] && [[ "$format" == "text" ]]; then
+  printf "\r%*s\r" 80 "" >&2  # Clear the progress line
+fi
+
+# Calculate end time before processing results
+end_time=$(date +%s)
+
+# Process and display results
+if [ -s "$results_file" ]; then
+  sorted_results=$(sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$results_file")
+  # Apply filtering if requested
+  filtered_results="$sorted_results"
+  if [[ -n "$filter" ]]; then
+    if [[ "$filter" == re:* ]]; then
+      # Regex filter (strip 're:' prefix)
+      regex="${filter#re:}"
+      filtered_results=$(echo "$sorted_results" | grep -E "$regex")
+    elif [[ "$filter" == *'*'* || "$filter" == *'?'* ]]; then
+      # Wildcard filter (convert to shell pattern)
+      filtered_results=$(echo "$sorted_results" | grep -E "^$(echo "$filter" | sed 's/\*/.*/g; s/\?/./g')")
+    else
+      # Substring filter
+      filtered_results=$(echo "$sorted_results" | grep -- "$filter")
+    fi
+  fi
+  live_hosts=$(echo "$filtered_results" | grep -c '^' || echo 0)
+  case "$format" in
+    "json")
+      echo "{"
+      echo "  \"results\": ["
+      first=true
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        if [[ "$first" != true ]]; then
+          echo ","
+        fi
+        first=false
+        # Split line into fields
+        ip=$(echo "$line" | cut -d' ' -f1)
+        host_status=$(echo "$line" | cut -d' ' -f2)
+        hostname=$(echo "$line" | cut -d' ' -f3- -s)
+        if [[ -n "$hostname" ]]; then
+          printf '    {"ip": "%s", "status": "%s", "hostname": "%s"}' \
+            "$ip" "$host_status" "$hostname"
+        else
+          printf '    {"ip": "%s", "status": "%s"}' "$ip" "$host_status"
+        fi
+      done <<< "$filtered_results"
+      echo
+      echo "  ],"
+      echo "  \"stats\": {"
+      printf '    "total_hosts": %d,\n' "$live_hosts"
+      printf '    "scan_time_seconds": %d\n' "$((end_time-start_time))"
+      echo "  }"
+      echo "}"
+      ;;
+    "yaml")
+      echo "results:"
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        # Split line into fields
+        ip=$(echo "$line" | cut -d' ' -f1)
+        host_status=$(echo "$line" | cut -d' ' -f2)
+        hostname=$(echo "$line" | cut -d' ' -f3- -s)
+        if [[ -n "$hostname" ]]; then
+          printf '  - ip: %s\n    status: %s\n    hostname: %s\n' \
+            "$ip" "$host_status" "$hostname"
+        else
+          printf '  - ip: %s\n    status: %s\n' "$ip" "$host_status"
+        fi
+      done <<< "$filtered_results"
+      echo "stats:"
+      printf '  total_hosts: %d\n' "$live_hosts"
+      printf '  scan_time_seconds: %d\n' "$((end_time-start_time))"
+      ;;
+    *)
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        ip=$(echo "$line" | cut -d' ' -f1)
+        host_status=$(echo "$line" | cut -d' ' -f2)
+        hostname=$(echo "$line" | cut -d' ' -f3- -s)
+        if [[ "$host_status" == "up" ]]; then
+          if [[ -n "$hostname" ]]; then
+            printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${GREEN}${host_status}${NC}      " "$hostname"
+          else
+            printf "%-15s  %-${STATUS_PAD}s\n" "$ip" "${GREEN}${host_status}${NC}      "
+          fi
+        else
+          printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${RED}${host_status}${NC}    " "$hostname"
+        fi
+      done <<< "$filtered_results"
+      echo
+      echo "Found ${live_hosts} hosts in $((end_time-start_time))s"
+      ;;
+  esac
+fi
