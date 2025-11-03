@@ -17,10 +17,10 @@ A fast, concurrent network ping sweep tool that supports multiple output formats
 
 ## Performance Notes
 
-- **Shell-specific concurrency**: Default concurrency is 255 jobs for bash, 50 jobs for zsh
-- **zsh limitation**: Due to zsh's internal job table limits, very large subnets (/20 and larger) may show occasional "job table full" warnings in zsh, though scans complete successfully
+- **Shell-specific concurrency**: Default concurrency is 255 jobs for bash, 40 jobs for zsh
+- **zsh limitation**: Due to zsh's internal job table limits (hard-coded ~256 total jobs), very large subnets (/20 and larger) may show "job table full" warnings. **Scans complete successfully despite this warning.**
 - **Performance**: Typical /24 subnet scans complete in ~1.5-2 seconds
-- **Tuning**: Use `-j` flag to adjust concurrency for your environment (e.g., `-j 100` for higher throughput)
+- **Tuning**: Use `-j` flag to adjust concurrency for your environment (e.g., `-j 100` for higher throughput in bash, `-j 20` for more stability in zsh on very large subnets)
 
 ## Installation
 This tool is designed to be used as a function in a zsh shell environment.

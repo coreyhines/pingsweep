@@ -26,7 +26,7 @@ show_progress() {
 
 # Default concurrency level (lower for zsh due to job table limits)
 if [[ -n "$ZSH_VERSION" ]]; then
-  max_jobs=50  # zsh has hard job table limit, must stay conservative
+  max_jobs=40  # zsh has hard job table limit (~256 total), stay well under
 else
   max_jobs=255  # bash can handle more
 fi
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: pingsweep [options] <CIDR subnet>"
       echo "Options:"
       echo "  -f, --format FORMAT    Output format: text (default), json, or yaml"
-      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 50 for zsh, 255 for bash)"
+      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 40 for zsh, 255 for bash)"
       echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
       echo "  -h, --help            Show this help message"
       echo "Example: pingsweep 192.168.1.0/24"
@@ -226,15 +226,14 @@ while IFS= read -r ip; do
   
   ((count++))
 
-  # Adaptive job control: check actual running jobs for zsh
+  # Wait every max_jobs iterations (batched wait)
+  # For zsh, wait more frequently to prevent job table overflow
   if [[ -n "$ZSH_VERSION" ]]; then
-    # For zsh, actively manage running job count to avoid table overflow
-    while (( $(jobs -r | wc -l) >= max_jobs )); do
-      sleep 0.01
-    done
+    if (( count % 20 == 0 )); then  # Wait every 20 jobs for zsh
+      wait
+    fi
   else
-    # For bash, use efficient batched waits
-    if (( count % max_jobs == 0 )); then
+    if (( count % max_jobs == 0 )); then  # Wait every max_jobs for bash
       wait
     fi
   fi
