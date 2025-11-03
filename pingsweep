@@ -24,8 +24,12 @@ show_progress() {
 
 # No external dependencies required - uses built-in IP generation
 
-# Default concurrency level (matches main branch)
-max_jobs=255
+# Default concurrency level (lower for zsh due to job table limits)
+if [[ -n "$ZSH_VERSION" ]]; then
+  max_jobs=25  # zsh has job table limit, keep conservative to avoid errors
+else
+  max_jobs=255  # bash can handle more
+fi
 
 format="text"
 subnet=""
@@ -50,7 +54,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: pingsweep [options] <CIDR subnet>"
       echo "Options:"
       echo "  -f, --format FORMAT    Output format: text (default), json, or yaml"
-      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 255)"
+      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 25 for zsh, 255 for bash)"
       echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
       echo "  -h, --help            Show this help message"
       echo "Example: pingsweep 192.168.1.0/24"
@@ -204,27 +208,21 @@ RED=$'\033[0;31m'
 NC=$'\033[0m'  # No Color
 STATUS_PAD=12  # Padding for status column
 
-# Function to scan a single IP
-scan_ip() {
-  local ip="$1"
-  local results_file="$2"
-  
-  local hostname=$(dns_lookup "$ip")
-  if ping -c1 -W1 "$ip" >/dev/null 2>&1; then
-    if [[ -n "$hostname" ]]; then
-      echo "$ip up $hostname" >> "$results_file"
-    else
-      echo "$ip up" >> "$results_file"
-    fi
-  elif [[ -n "$hostname" ]]; then
-    echo "$ip down $hostname" >> "$results_file"
-  fi
-}
-
-# Process IPs with batched concurrency (like main branch)
+# Process IPs with batched concurrency (inline blocks to avoid job table overflow)
 while IFS= read -r ip; do
-  # Launch scan in background
-  scan_ip "$ip" "$results_file" &
+  # Launch scan in background using inline block (more efficient than function call)
+  {
+    hostname=$(dns_lookup "$ip")
+    if ping -c1 -W1 "$ip" >/dev/null 2>&1; then
+      if [[ -n "$hostname" ]]; then
+        echo "$ip up $hostname" >> "$results_file"
+      else
+        echo "$ip up" >> "$results_file"
+      fi
+    elif [[ -n "$hostname" ]]; then
+      echo "$ip down $hostname" >> "$results_file"
+    fi
+  } &
   
   ((count++))
 
