@@ -210,6 +210,11 @@ STATUS_PAD=12  # Padding for status column
 
 # Process IPs with batched concurrency (inline blocks to avoid job table overflow)
 while IFS= read -r ip; do
+  # For zsh, proactively wait if job table is getting full
+  if [[ -n "$ZSH_VERSION" ]] && (( count > 0 && count % 20 == 0 )); then
+    wait
+  fi
+  
   # Launch scan in background using inline block (more efficient than function call)
   {
     hostname=$(dns_lookup "$ip")
@@ -226,16 +231,9 @@ while IFS= read -r ip; do
   
   ((count++))
 
-  # Wait every max_jobs iterations (batched wait)
-  # For zsh, wait more frequently to prevent job table overflow
-  if [[ -n "$ZSH_VERSION" ]]; then
-    if (( count % 20 == 0 )); then  # Wait every 20 jobs for zsh
-      wait
-    fi
-  else
-    if (( count % max_jobs == 0 )); then  # Wait every max_jobs for bash
-      wait
-    fi
+  # For bash, use standard batched waits
+  if [[ -z "$ZSH_VERSION" ]] && (( count % max_jobs == 0 )); then
+    wait
   fi
 
   # Update progress for large subnets
