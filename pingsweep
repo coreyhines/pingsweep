@@ -24,8 +24,8 @@ show_progress() {
 
 # No external dependencies required - uses built-in IP generation
 
-# Default concurrency level
-max_jobs=50
+# Default concurrency level (matches main branch)
+max_jobs=255
 
 format="text"
 subnet=""
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: pingsweep [options] <CIDR subnet>"
       echo "Options:"
       echo "  -f, --format FORMAT    Output format: text (default), json, or yaml"
-      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 50)"
+      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 255)"
       echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
       echo "  -h, --help            Show this help message"
       echo "Example: pingsweep 192.168.1.0/24"
@@ -148,14 +148,22 @@ generate_ips() {
   return 0
 }
 
-# Calculate total IPs and determine if we need progress indicator
-# Use our custom IP generation function (no external dependencies)
+# Detect if prips is available for faster IP generation
+use_prips=false
+if command -v prips >/dev/null 2>&1; then
+  use_prips=true
+fi
 
-# Calculate total IPs using our custom function
-temp_ip_file=$(mktemp)
-generate_ips "$subnet" "$temp_ip_file"
-total_ips=$(wc -l < "$temp_ip_file")
-rm -f "$temp_ip_file"
+# Calculate total IPs and determine if we need progress indicator
+if [ "$use_prips" = true ]; then
+  total_ips=$(prips "$subnet" | wc -l)
+else
+  temp_ip_file=$(mktemp)
+  generate_ips "$subnet" "$temp_ip_file"
+  total_ips=$(wc -l < "$temp_ip_file")
+  rm -f "$temp_ip_file"
+fi
+
 show_progress=false
 if [ "$total_ips" -gt 256 ]; then
   show_progress=true
@@ -181,8 +189,12 @@ last_24_block=""
 results_file=$(mktemp)
 trap "rm -f '$results_file' '$results_file.ips'" EXIT # Ensure temp files are cleaned up
 
-# Generate IP list using our custom function
-generate_ips "$subnet" "$results_file.ips"
+# Generate IP list - use prips if available, otherwise use built-in generator
+if [ "$use_prips" = true ]; then
+  prips "$subnet" > "$results_file.ips"
+else
+  generate_ips "$subnet" "$results_file.ips"
+fi
 
 GREEN=$'\033[0;32m'
 RED=$'\033[0;31m'
@@ -206,17 +218,17 @@ scan_ip() {
   fi
 }
 
-# Process IPs with controlled concurrency
+# Process IPs with batched concurrency (like main branch)
 while IFS= read -r ip; do
-  # Wait for a slot if we've hit max_jobs
-  while [ $(jobs -r | wc -l) -ge $max_jobs ]; do
-    sleep 0.1
-  done
-  
   # Launch scan in background
   scan_ip "$ip" "$results_file" &
   
   ((count++))
+
+  # Wait every max_jobs iterations (batched wait - much more efficient)
+  if (( count % max_jobs == 0 )); then
+    wait
+  fi
 
   # Update progress for large subnets
   if [ "$show_progress" = true ] && [[ "$format" == "text" ]]; then
