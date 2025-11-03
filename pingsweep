@@ -3,9 +3,42 @@
 # Disable job control to prevent job messages
 set +m
 
+# Check for required commands
+check_requirements() {
+  local missing_cmds=()
+  
+  # Check for ping
+  if ! command -v ping >/dev/null 2>&1; then
+    missing_cmds+=("ping")
+  fi
+  
+  # Check for dig (optional, will warn but not fail)
+  if ! command -v dig >/dev/null 2>&1; then
+    echo "Warning: 'dig' command not found. DNS resolution will be skipped." >&2
+  fi
+  
+  # Check for date (needed for timing)
+  if ! command -v date >/dev/null 2>&1; then
+    missing_cmds+=("date")
+  fi
+  
+  # If critical commands are missing, exit
+  if [ ${#missing_cmds[@]} -gt 0 ]; then
+    echo "Error: Required command(s) not found: ${missing_cmds[*]}" >&2
+    echo "Please install the missing utilities and try again." >&2
+    exit 1
+  fi
+}
+
+# Run requirements check
+check_requirements
+
 # Function to perform DNS lookup with stderr redirection
 dns_lookup() {
-  dig +time=1 +tries=1 +short -x "$1" 2>/dev/null | sed 's/\.$//'
+  # Only attempt DNS lookup if dig is available
+  if command -v dig >/dev/null 2>&1; then
+    dig +time=1 +tries=1 +short -x "$1" 2>/dev/null | sed 's/\.$//'
+  fi
 }
 
 # Progress spinner function
@@ -261,13 +294,19 @@ if [ -s "$results_file" ]; then
     if [[ "$filter" == re:* ]]; then
       # Regex filter (strip 're:' prefix)
       regex="${filter#re:}"
-      filtered_results=$(echo "$sorted_results" | grep -E "$regex")
+      # Try to apply regex, catch errors
+      if ! filtered_results=$(echo "$sorted_results" | grep -E "$regex" 2>/dev/null); then
+        echo "Error: Invalid or problematic regex pattern: $regex" >&2
+        exit 1
+      fi
     elif [[ "$filter" == *'*'* || "$filter" == *'?'* ]]; then
-      # Wildcard filter (convert to shell pattern)
-      filtered_results=$(echo "$sorted_results" | grep -E "^$(echo "$filter" | sed 's/\*/.*/g; s/\?/./g')")
+      # Wildcard filter (convert to safe shell pattern)
+      # Escape special regex chars except * and ?
+      safe_filter=$(echo "$filter" | sed 's/[.[\^$]/\\&/g; s/\*/.*/g; s/\?/./g')
+      filtered_results=$(echo "$sorted_results" | grep -E "$safe_filter" 2>/dev/null || echo "")
     else
-      # Substring filter
-      filtered_results=$(echo "$sorted_results" | grep -- "$filter")
+      # Substring filter - use -F for fixed string (no regex interpretation)
+      filtered_results=$(echo "$sorted_results" | grep -F -- "$filter" 2>/dev/null || echo "")
     fi
   fi
   live_hosts=$(echo "$filtered_results" | grep -c '^' || echo 0)
