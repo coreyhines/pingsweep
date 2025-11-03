@@ -49,11 +49,19 @@ if [ ! -f "$ZSHFUNC" ]; then
 fi
 awk '/^pingsweep\(\)/ {in_func=1; brace=0} in_func {brace+=gsub(/{/,"{"); brace-=gsub(/}/,"}"); if (brace<=0 && /}/) {in_func=0; next} next} {print}' "$ZSHFUNC" > "$ZSHFUNC.tmp" && mv "$ZSHFUNC.tmp" "$ZSHFUNC"
 
-# Create the pingsweep function by wrapping the script content
-echo "pingsweep() {" >> "$ZSHFUNC"
-# Skip the shebang line when copying the script content
-tail -n +2 "$PINGSWEEP_PATH" >> "$ZSHFUNC"
-echo "}" >> "$ZSHFUNC"
+# Install standalone bash script to ~/.local/bin
+INSTALL_DIR="$HOME/.local/bin"
+mkdir -p "$INSTALL_DIR"
+cp "$PINGSWEEP_PATH" "$INSTALL_DIR/pingsweep"
+chmod +x "$INSTALL_DIR/pingsweep"
+
+# Create zsh wrapper function that calls the bash script
+cat >> "$ZSHFUNC" << 'EOFUNC'
+pingsweep() {
+  # Call the standalone bash script to avoid zsh job table limits
+  "$HOME/.local/bin/pingsweep" "$@"
+}
+EOFUNC
 chmod 600 "$ZSHFUNC"
 
 # Add guarded sourcing of .zshfunc to ZSHRC

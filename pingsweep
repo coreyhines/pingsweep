@@ -2,9 +2,6 @@
 
 # Disable job control to prevent job messages
 set +m
-if [[ -n "$ZSH_VERSION" ]]; then
-  unsetopt MONITOR
-fi
 
 # Function to perform DNS lookup with stderr redirection
 dns_lookup() {
@@ -24,12 +21,8 @@ show_progress() {
 
 # No external dependencies required - uses built-in IP generation
 
-# Default concurrency level (lower for zsh due to job table limits)
-if [[ -n "$ZSH_VERSION" ]]; then
-  max_jobs=40  # zsh has hard job table limit (~256 total), stay well under
-else
-  max_jobs=255  # bash can handle more
-fi
+# Default concurrency level (bash can handle more than zsh)
+max_jobs=255
 
 format="text"
 subnet=""
@@ -54,7 +47,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: pingsweep [options] <CIDR subnet>"
       echo "Options:"
       echo "  -f, --format FORMAT    Output format: text (default), json, or yaml"
-      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 40 for zsh, 255 for bash)"
+      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 255)"
       echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
       echo "  -h, --help            Show this help message"
       echo "Example: pingsweep 192.168.1.0/24"
@@ -210,11 +203,6 @@ STATUS_PAD=12  # Padding for status column
 
 # Process IPs with batched concurrency (inline blocks to avoid job table overflow)
 while IFS= read -r ip; do
-  # For zsh, proactively wait if job table is getting full
-  if [[ -n "$ZSH_VERSION" ]] && (( count > 0 && count % 20 == 0 )); then
-    wait
-  fi
-  
   # Launch scan in background using inline block (more efficient than function call)
   {
     hostname=$(dns_lookup "$ip")
@@ -231,8 +219,8 @@ while IFS= read -r ip; do
   
   ((count++))
 
-  # For bash, use standard batched waits
-  if [[ -z "$ZSH_VERSION" ]] && (( count % max_jobs == 0 )); then
+  # Wait every max_jobs iterations (batched wait)
+  if (( count % max_jobs == 0 )); then
     wait
   fi
 
