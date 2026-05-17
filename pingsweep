@@ -335,6 +335,10 @@ if [ -s "$results_file" ]; then
     if [[ "$filter" == re:* ]]; then
       # Regex filter (strip 're:' prefix)
       regex="${filter#re:}"
+      if [[ -z "$regex" ]]; then
+        echo "Error: Empty regex pattern" >&2
+        exit 1
+      fi
       # Try to apply regex, catch errors
       if ! filtered_results=$(echo "$sorted_results" | grep -E "$regex" 2>/dev/null); then
         echo "Error: Invalid or problematic regex pattern: $regex" >&2
