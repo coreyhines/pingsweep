@@ -1,5 +1,7 @@
 #!/bin/bash
 
+PINGSWEEP_VERSION="1.0.0"
+
 # Disable job control to prevent job messages
 set +m
 
@@ -29,9 +31,6 @@ check_requirements() {
     exit 1
   fi
 }
-
-# Run requirements check
-check_requirements
 
 # Function to perform DNS lookup with stderr redirection
 dns_lookup() {
@@ -95,6 +94,10 @@ while [[ $# -gt 0 ]]; do
       filter="$2"
       shift 2
       ;;
+    -v|--version)
+      echo "pingsweep $PINGSWEEP_VERSION"
+      exit 0
+      ;;
     -h|--help)
       echo "Usage: pingsweep [options] <CIDR subnet>"
       echo "Options:"
@@ -104,6 +107,7 @@ while [[ $# -gt 0 ]]; do
       echo "  -q, --quiet            Quiet mode - suppress progress output"
       echo "  -n, --dry-run          Show IPs that would be scanned without scanning"
       echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
+      echo "  -v, --version         Show version information"
       echo "  -h, --help            Show this help message"
       echo "Example: pingsweep 192.168.1.0/24"
       echo "         pingsweep -f json 192.168.1.0/24"
@@ -118,6 +122,8 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+check_requirements
 
 # Validate format
 if [[ "$format" != "text" && "$format" != "json" && "$format" != "yaml" && "$format" != "csv" ]]; then
