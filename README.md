@@ -1,221 +1,93 @@
 # pingsweep
 
-A fast, concurrent network ping sweep tool that supports multiple output formats (text, JSON, YAML).
+Concurrent ping sweep for IPv4 CIDR subnets. A single bash script with no build step.
 
-## Features
-- Concurrent host scanning for speed
-- DNS resolution for discovered hosts
-- Multiple output formats (text, JSON, YAML, CSV)
-- Color-coded output in text mode (auto-disabled when piped)
-- Support for CIDR notation
-- Built-in IP range generation (no external dependencies)
-- Search/filter results with substring, wildcards, or regex
-- Quiet mode for scripting and non-interactive use
-- Dry-run mode to preview IP ranges
-- Configurable timeouts and concurrency
+## What it reports
 
-## Requirements
+For each address in the subnet, pingsweep pings once and optionally looks up reverse DNS (`dig -x`).
 
-- `ping` - Network ping utility (required)
-- `dig` - DNS lookup utility (optional - DNS resolution skipped if not available)
-- `date` - Date utility (required for timing)
+- **Up** — host responded to ping (always listed)
+- **Down** — host did not respond but has a PTR record (listed with hostname)
+- **Silent** — no ping response and no DNS record (omitted from output)
 
-## Performance Notes
+Results are sorted by IP. Use `-s` to filter the output lines by substring, wildcard (`*`, `?`), or regex (`re:pattern`).
 
-- **Concurrency**: Default is 255 concurrent jobs for optimal performance
-- **Shell compatibility**: When used as a zsh function, automatically calls the standalone bash script to avoid zsh's job table limitations
-- **Performance**: Typical /24 subnet scans complete in ~1.5-2 seconds, /20 subnets in ~30 seconds
-- **Tuning**: Use `-j` flag to adjust concurrency for your environment
+## Quick start
 
-## Installation
-
-### Automatic Installation (Recommended)
-
-Use the provided installation script:
+Run directly from the repo — no install required:
 
 ```bash
-# Clone the repository
+./pingsweep 192.168.1.0/24
+./pingsweep -f json -q 192.168.1.0/24
+```
+
+## Install
+
+macOS and most Linux desktops default to zsh. The installer sets up a zsh function that calls the bash script (zsh's job table limits concurrent background jobs; the scan itself runs in bash).
+
+```bash
 git clone https://github.com/coreyhines/pingsweep.git
 cd pingsweep
-
-# Run the installation script
 ./install_pingsweep.sh
 ```
 
-The installer will:
-1. Install the standalone bash script to `~/.local/bin/pingsweep`
-2. Create a lightweight zsh wrapper function in `~/.zshfunc`
-3. Update your `.zshrc` to source the function (with guards to prevent duplicate sourcing)
-4. Back up your `.zshrc` before making changes
+This copies the script to `~/.local/bin/pingsweep`, adds a wrapper to `~/.zshfunc`, and updates your zsh config (with a backup). Restart the shell or run `source ~/.zshrc`.
 
-This approach ensures optimal performance by running the script in bash (avoiding zsh job table limitations) while maintaining seamless zsh integration.
+**Manual install:** copy `pingsweep` to a directory on your `PATH`, make it executable, and call it directly. Bash users do not need the zsh wrapper.
 
-### Manual Installation
-
-You can install manually if needed:
-
-1. Copy the script to your local bin directory:
-   ```bash
-   mkdir -p ~/.local/bin
-   cp pingsweep ~/.local/bin/pingsweep
-   chmod +x ~/.local/bin/pingsweep
-   ```
-
-2. Add the wrapper function to your `~/.zshrc`:
-   ```bash
-   pingsweep() {
-     "$HOME/.local/bin/pingsweep" "$@"
-   }
-   ```
-
-3. Ensure `~/.local/bin` is in your PATH:
-   ```bash
-   export PATH="$HOME/.local/bin:$PATH"
-   ```
-
-4. Restart your shell or run `source ~/.zshrc`
-
-## Usage
-
-```bash
-pingsweep [options] <CIDR subnet>
-```
-
-### Options
+## Options
 
 ```
   -f, --format FORMAT    Output format: text (default), json, yaml, or csv
   -j, --jobs JOBS        Max concurrent jobs (default: 255)
-  -t, --timeout SECONDS  Timeout for ping/DNS queries (default: 1)
-  -q, --quiet            Quiet mode - suppress progress output
-  -n, --dry-run          Show IPs that would be scanned without scanning
-  -s, --search SEARCH    Search/filter output (supports substring, wildcards, or regex with re: prefix)
-  -h, --help             Show this help message
+  -t, --timeout SECONDS  Timeout for ping and DNS queries (default: 1)
+  -q, --quiet            Suppress progress and summary (text mode)
+  -n, --dry-run          List IPs without scanning
+  -s, --search PATTERN   Filter output (substring, wildcards, or re:regex)
+  -v, --version          Show version
+  -h, --help             Show help
 ```
 
-### Examples
+## Examples
 
-#### Text Output (Default)
+**Text output** (progress banner and summary go to stderr; colors when stdout is a TTY):
 
 ```bash
-~ » pingsweep 192.168.1.0/24
-Scanning 192.168.1.0/24...
-192.168.1.1      up          router.local
-192.168.1.5      up          laptop.local
-192.168.1.10     up          desktop.local
-192.168.1.20     down        printer.local
-192.168.1.25     up          
-Found 5 hosts in 3s
+pingsweep 192.168.1.0/24
+# 192.168.1.1      up          router.local
+# Found 12 hosts in 2s
 ```
 
-#### JSON Output
+**Scripting with JSON:**
 
 ```bash
-~ » pingsweep -f json 192.168.1.0/24
-Scanning 192.168.1.0/24...
-{
-  "results": [
-    {"ip": "192.168.1.1", "status": "up", "hostname": "router.local"},
-    {"ip": "192.168.1.5", "status": "up", "hostname": "laptop.local"},
-    {"ip": "192.168.1.10", "status": "up", "hostname": "desktop.local"},
-    {"ip": "192.168.1.20", "status": "down", "hostname": "printer.local"},
-    {"ip": "192.168.1.25", "status": "up"}
-  ],
-  "stats": {
-    "total_hosts": 5,
-    "scan_time_seconds": 3
-  }
-}
+pingsweep -q -f json 192.168.1.0/24 | jq '.results[] | select(.status=="up")'
 ```
 
-#### YAML Output
+**Filter and dry-run:**
 
 ```bash
-~ » pingsweep -f yaml 192.168.1.0/24
-Scanning 192.168.1.0/24...
-results:
-  - ip: 192.168.1.1
-    status: up
-    hostname: router.local
-  - ip: 192.168.1.5
-    status: up
-    hostname: laptop.local
-  - ip: 192.168.1.10
-    status: up
-    hostname: desktop.local
-  - ip: 192.168.1.20
-    status: down
-    hostname: printer.local
-  - ip: 192.168.1.25
-    status: up
-stats:
-  total_hosts: 5
-  scan_time_seconds: 3
+pingsweep -s 'router*' 192.168.1.0/24
+pingsweep -n 192.168.1.0/29          # preview IP list, no pings
 ```
 
-#### CSV Output
+## Requirements
 
-```bash
-~ » pingsweep -f csv 192.168.1.0/24
-IP,Status,Hostname
-192.168.1.1,up,"router.local"
-192.168.1.5,up,"laptop.local"
-192.168.1.10,up,"desktop.local"
-192.168.1.20,down,"printer.local"
-192.168.1.25,up,
-```
+| Command | Required | Purpose |
+|---------|----------|---------|
+| `ping`  | yes      | Host reachability |
+| `date`  | yes      | Scan timing |
+| `dig`   | no       | Reverse DNS (skipped if absent) |
+| `prips` | no       | Faster IP list generation (built-in fallback) |
 
-#### Filtering Output
+Subnets larger than 65,536 addresses print a warning before scanning.
 
-Filter results using the `--search` or `-s` option with substring, wildcard, or regex:
+## Notes
 
-```bash
-# Substring match
-~ » pingsweep -s 'router' 192.168.1.0/24
+- Tune `-j` (concurrency) and `-t` (timeout) for your network; defaults suit typical LAN scans.
+- Progress spinner appears in text mode for subnets over 256 IPs when not using `-q`.
+- JSON/YAML `stats.total_hosts` counts result rows after filtering (up hosts plus down hosts with DNS).
 
-# Wildcard match
-~ » pingsweep -s 'router*' 192.168.1.0/24
+## License
 
-# Regex match (prefix with 're:')
-~ » pingsweep --search 're:^192\\.168\\.1\\.[0-9]+ up' 192.168.1.0/24
-```
-
-#### Quiet Mode for Scripting
-
-```bash
-# Suppress progress messages and summary
-~ » pingsweep -q 192.168.1.0/24
-192.168.1.1      up          router.local
-192.168.1.5      up          laptop.local
-
-# Perfect for piping to other tools
-~ » pingsweep -q -f json 192.168.1.0/24 | jq '.results[] | select(.status=="up")'
-```
-
-#### Dry Run
-
-```bash
-# Preview IPs without scanning
-~ » pingsweep -n 192.168.1.0/29
-Dry-run mode: IPs that would be scanned:
-192.168.1.0
-192.168.1.1
-192.168.1.2
-192.168.1.3
-192.168.1.4
-192.168.1.5
-192.168.1.6
-192.168.1.7
-
-Total: 8 IPs
-```
-
-#### Custom Timeout and Concurrency
-
-```bash
-# Faster scan with shorter timeout
-~ » pingsweep -t 0.5 -j 500 192.168.1.0/24
-
-# More conservative for slower networks
-~ » pingsweep -t 3 -j 50 192.168.1.0/24
-```
+MIT — see [LICENSE](LICENSE).
