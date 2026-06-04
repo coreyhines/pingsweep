@@ -56,9 +56,9 @@ show_progress() {
 # Default concurrency level (bash can handle more than zsh)
 max_jobs=255
 
-# Default timeout values (in seconds)
-ping_timeout=1
-dns_timeout=1
+# User-facing timeout in seconds (default 1s). Per-tool values are derived after
+# arg parsing because ping -W units differ by platform (see below).
+timeout_seconds=${timeout:-1}
 
 format="text"
 subnet=""
@@ -78,8 +78,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -t|--timeout)
-      ping_timeout="$2"
-      dns_timeout="$2"
+      timeout_seconds="$2"
       shift 2
       ;;
     -q|--quiet)
@@ -125,6 +124,14 @@ done
 
 check_requirements
 
+# Derive per-tool timeouts from the user-facing seconds value. dig's +time is
+# always seconds; ping's -W is milliseconds on macOS/BSD but seconds on Linux.
+dns_timeout="$timeout_seconds"
+case "$(uname -s)" in
+  Darwin|*BSD*) ping_timeout=$(( timeout_seconds * 1000 )) ;;
+  *)            ping_timeout="$timeout_seconds" ;;
+esac
+
 # Validate format
 if [[ "$format" != "text" && "$format" != "json" && "$format" != "yaml" && "$format" != "csv" ]]; then
   echo "Error: Invalid format. Supported formats are: text, json, yaml, csv"
@@ -149,9 +156,9 @@ generate_ips() {
     return 1
   fi
   
-  # Parse CIDR notation
-  local ip_part=$(echo "$subnet" | cut -d'/' -f1)
-  local cidr=$(echo "$subnet" | cut -d'/' -f2)
+  # Parse CIDR notation (parameter expansion avoids subshell overhead)
+  local ip_part="${subnet%/*}"
+  local cidr="${subnet#*/}"
   
   # Validate CIDR range
   if (( cidr < 0 || cidr > 32 )); then
@@ -159,11 +166,9 @@ generate_ips() {
     return 1
   fi
   
-  # Parse IP address and validate each octet
-  local ip1=$(echo "$ip_part" | cut -d'.' -f1)
-  local ip2=$(echo "$ip_part" | cut -d'.' -f2)
-  local ip3=$(echo "$ip_part" | cut -d'.' -f3)
-  local ip4=$(echo "$ip_part" | cut -d'.' -f4)
+  # Parse IP address octets (single read avoids four cut subshells)
+  local ip1 ip2 ip3 ip4
+  IFS=. read -r ip1 ip2 ip3 ip4 <<< "$ip_part"
   
   # Validate IP octets
   for octet in "$ip1" "$ip2" "$ip3" "$ip4"; do
@@ -185,7 +190,11 @@ generate_ips() {
     echo "$ip_part" > "$output_file"
     return 0
   fi
-  
+
+  # Align to the network boundary so a non-aligned host address (e.g. .10/24)
+  # produces the full network (.0-.255), matching prips' behavior
+  base_ip=$(( base_ip & ~(num_hosts - 1) ))
+
   # Handle very large subnets (warn but don't fail)
   if (( num_hosts > 65536 )); then
     echo "Warning: Large subnet with $num_hosts IPs, this may take a while..." >&2
@@ -213,10 +222,15 @@ if command -v prips >/dev/null 2>&1; then
 fi
 
 # Calculate total IPs and determine if we need progress indicator
+total_ips=0
 if [ "$use_prips" = true ]; then
-  total_ips=$(prips "$subnet" | wc -l)
-else
+  total_ips=$(prips "$subnet" 2>/dev/null | wc -l)
+fi
+# Fall back to the built-in generator when prips is absent or rejected the input
+# (e.g. a non-network-aligned address), so the count matches what is scanned
+if [ "$use_prips" != true ] || [ "$total_ips" -eq 0 ]; then
   temp_ip_file=$(mktemp)
+  trap 'rm -f "$temp_ip_file"' EXIT  # clean up if interrupted during counting
   generate_ips "$subnet" "$temp_ip_file"
   total_ips=$(wc -l < "$temp_ip_file")
   rm -f "$temp_ip_file"
@@ -285,15 +299,13 @@ fi
 while IFS= read -r ip; do
   # Launch scan in background using inline block (more efficient than function call)
   {
-    hostname=$(dns_lookup "$ip")
     if ping -c1 -W$ping_timeout "$ip" >/dev/null 2>&1; then
+      hostname=$(dns_lookup "$ip")
       if [[ -n "$hostname" ]]; then
         echo "$ip up $hostname" >> "$results_file"
       else
         echo "$ip up" >> "$results_file"
       fi
-    elif [[ -n "$hostname" ]]; then
-      echo "$ip down $hostname" >> "$results_file"
     fi
   } &
   
@@ -360,7 +372,12 @@ if [ -s "$results_file" ]; then
       filtered_results=$(echo "$sorted_results" | grep -F -- "$filter" 2>/dev/null || echo "")
     fi
   fi
-  live_hosts=$(echo "$filtered_results" | grep -c '^' || echo 0)
+  # Count result rows; guard against the empty string counting as one line
+  if [[ -n "$filtered_results" ]]; then
+    live_hosts=$(grep -c '^' <<< "$filtered_results")
+  else
+    live_hosts=0
+  fi
   case "$format" in
     "csv")
       echo "IP,Status,Hostname"
@@ -393,8 +410,11 @@ if [ -s "$results_file" ]; then
         host_status=$(echo "$line" | cut -d' ' -f2)
         hostname=$(echo "$line" | cut -d' ' -f3- -s)
         if [[ -n "$hostname" ]]; then
+          # Escape backslashes then quotes so unusual PTR records stay valid JSON
+          esc_hostname=${hostname//\\/\\\\}
+          esc_hostname=${esc_hostname//\"/\\\"}
           printf '    {"ip": "%s", "status": "%s", "hostname": "%s"}' \
-            "$ip" "$host_status" "$hostname"
+            "$ip" "$host_status" "$esc_hostname"
         else
           printf '    {"ip": "%s", "status": "%s"}' "$ip" "$host_status"
         fi
@@ -416,8 +436,11 @@ if [ -s "$results_file" ]; then
         host_status=$(echo "$line" | cut -d' ' -f2)
         hostname=$(echo "$line" | cut -d' ' -f3- -s)
         if [[ -n "$hostname" ]]; then
-          printf '  - ip: %s\n    status: %s\n    hostname: %s\n' \
-            "$ip" "$host_status" "$hostname"
+          # Quote and escape so special characters stay valid YAML
+          esc_hostname=${hostname//\\/\\\\}
+          esc_hostname=${esc_hostname//\"/\\\"}
+          printf '  - ip: %s\n    status: %s\n    hostname: "%s"\n' \
+            "$ip" "$host_status" "$esc_hostname"
         else
           printf '  - ip: %s\n    status: %s\n' "$ip" "$host_status"
         fi

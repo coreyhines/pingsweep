@@ -23,6 +23,19 @@ ZSHFUNC="$HOME/.zshfunc"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 PINGSWEEP_PATH="$SCRIPT_DIR/pingsweep"
 
+# Confirm before modifying user config files (skip with -y/--yes)
+if [[ "$1" != "-y" && "$1" != "--yes" ]]; then
+    echo -e "${YELLOW}This installer will:${NC}"
+    echo "  - modify $ZSHRC (a timestamped backup is created first)"
+    echo "  - modify $ZSHFUNC"
+    echo "  - install pingsweep to $HOME/.local/bin"
+    read -r -p "Proceed? [y/N] " reply
+    case "$reply" in
+        [yY]|[yY][eE][sS]) ;;
+        *) echo "Aborted."; exit 0 ;;
+    esac
+fi
+
 # Check if ZSHRC exists
 if [ ! -f "$ZSHRC" ]; then
     echo -e "${YELLOW}Warning: $ZSHRC does not exist.${NC}"
