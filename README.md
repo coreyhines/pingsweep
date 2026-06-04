@@ -4,11 +4,10 @@ Concurrent ping sweep for IPv4 CIDR subnets. A single bash script with no build 
 
 ## What it reports
 
-For each address in the subnet, pingsweep pings once and optionally looks up reverse DNS (`dig -x`).
+For each address in the subnet, pingsweep pings once; responding hosts optionally get reverse DNS (`dig -x`).
 
-- **Up** — host responded to ping (always listed)
-- **Down** — host did not respond but has a PTR record (listed with hostname)
-- **Silent** — no ping response and no DNS record (omitted from output)
+- **Up** — host responded to ping (listed, with reverse DNS when available)
+- **Silent** — no ping response (omitted from output; no reverse DNS lookup)
 
 Results are sorted by IP. Use `-s` to filter the output lines by substring, wildcard (`*`, `?`), or regex (`re:pattern`).
 
@@ -86,7 +85,7 @@ Subnets larger than 65,536 addresses print a warning before scanning.
 
 - Tune `-j` (concurrency) and `-t` (timeout) for your network; defaults suit typical LAN scans.
 - Progress spinner appears in text mode for subnets over 256 IPs when not using `-q`.
-- JSON/YAML `stats.total_hosts` counts result rows after filtering (up hosts plus down hosts with DNS).
+- JSON/YAML `stats.total_hosts` counts result rows after filtering (responding hosts only).
 
 ## License
 

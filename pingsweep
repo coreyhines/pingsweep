@@ -299,15 +299,13 @@ fi
 while IFS= read -r ip; do
   # Launch scan in background using inline block (more efficient than function call)
   {
-    hostname=$(dns_lookup "$ip")
     if ping -c1 -W$ping_timeout "$ip" >/dev/null 2>&1; then
+      hostname=$(dns_lookup "$ip")
       if [[ -n "$hostname" ]]; then
         echo "$ip up $hostname" >> "$results_file"
       else
         echo "$ip up" >> "$results_file"
       fi
-    elif [[ -n "$hostname" ]]; then
-      echo "$ip down $hostname" >> "$results_file"
     fi
   } &
   
