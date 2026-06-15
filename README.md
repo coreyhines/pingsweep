@@ -79,7 +79,7 @@ pingsweep --v6 10.0.2.0/24
 
 Text mode drops the old `dns:` column; alignment issues appear as a yellow trailing note only when `A`/`AAAA` disagree with the aligned model. JSON/YAML/CSV still include `dns_alignment` and record fields for scripting.
 
-On macOS, `ping6` has no per-probe timeout flag (unlike `ping`); aligned probes use `ping6 -c1` with the OS default wait. `-t` still applies to IPv4 ping and `dig`.
+On macOS, `ping6` has no per-probe timeout flag (unlike `ping`); aligned probes use `ping6 -c1` with the OS default wait. `-t` still applies to IPv4 ping and `dig`. Cross-VLAN IPv6 probes use system routing (not interface bind); same-/64 scans may use `-I` when the outbound interface matches.
 
 Dry-run shows aligned targets:
 
