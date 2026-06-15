@@ -43,8 +43,47 @@ This copies the script to `~/.local/bin/pingsweep`, adds a wrapper to `~/.zshfun
   -q, --quiet            Suppress progress and summary (text mode)
   -n, --dry-run          List IPs without scanning
   -s, --search PATTERN   Filter output (substring, wildcards, or re:regex)
+      --v6               Parallel aligned IPv6 probes and DNS alignment checks
   -v, --version          Show version
   -h, --help             Show help
+```
+
+## IPv6 follow-up (`--v6`)
+
+IPv4 sweeps stay the same; `--v6` adds **parallel** ICMPv6 probes for every address in the range — no waiting for IPv4 to return first.
+
+For each IPv4 target `10.0.2.4`, pingsweep also pings an **aligned** address `{local-/64}::4`, using a derived global IPv6 `/64` for the scanned VLAN. The host-id is the **last IPv4 octet** (decimal). The VLAN is encoded in the **last digit** of the fourth hextet (`b502` = VLAN 2, `b508` = VLAN 8); for VLAN ≥ 10 the ones digit is dropped (`10.0.10.x` → `…b501::N`, not `…b510::N`).
+
+When reverse/forward DNS is available (`dig`), pingsweep checks whether the `AAAA` matches that aligned address and flags **mismatch** (e.g. `A` → `.4` but `AAAA` → `::feed`). Non-aligned `AAAA` targets are pinged as well so DHCP-registered v6-only names can still be found.
+
+**Requirements for `--v6`:**
+
+- Run from a host with **both** IPv4 and a global IPv6 `/64` on the VLAN/subnet you are scanning.
+- `dig` is strongly recommended for alignment checks (optional for ping-only).
+
+**Limitations (read before relying on this):**
+
+- Assumes your site aligns v4 last-octet with v6 host-id (`::N`). Most networks do **not** — expect many `down` / `mismatch` results elsewhere.
+- Prefix delegation (e.g. ISP PD) changes over time; orientation always comes from **this host’s current** addresses, not a configured prefix.
+- SLAAC, privacy addresses, and NAT64 break the simple `::N` model.
+- IPv6-only responders appear even when IPv4 is filtered; IPv4-only hosts still appear as today.
+
+**Example:**
+
+```bash
+pingsweep --v6 10.0.2.0/24
+# 10.0.2.2   v4:up   v6:up(::2)   pi.hole
+# 10.0.2.5   v4:up   v6:down(::5)   host5.example.com  AAAA 2601:…::feed (expected ::5)
+```
+
+Text mode drops the old `dns:` column; alignment issues appear as a yellow trailing note only when `A`/`AAAA` disagree with the aligned model. JSON/YAML/CSV still include `dns_alignment` and record fields for scripting.
+
+On macOS, `ping6` has no per-probe timeout flag (unlike `ping`); aligned probes use `ping6 -c1` with the OS default wait. `-t` still applies to IPv4 ping and `dig`.
+
+Dry-run shows aligned targets:
+
+```bash
+pingsweep -n --v6 10.0.2.0/29
 ```
 
 ## Examples

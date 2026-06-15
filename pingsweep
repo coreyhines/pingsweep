@@ -32,12 +32,272 @@ check_requirements() {
   fi
 }
 
-# Function to perform DNS lookup with stderr redirection
+# Strip dig comments/errors; return first usable answer only.
+dig_short_clean() {
+  grep -v '^;' | grep -viE 'connection timed out|no servers could be reached|^$' | head -1 | sed 's/\.$//'
+}
+
+# Reverse DNS (PTR) lookup
 dns_lookup() {
-  # Only attempt DNS lookup if dig is available
   if command -v dig >/dev/null 2>&1; then
-    dig +time=$dns_timeout +tries=1 +short -x "$1" 2>/dev/null | sed 's/\.$//'
+    dig +time=$dns_timeout +tries=1 +short -x "$1" 2>/dev/null | dig_short_clean
   fi
+}
+
+dns_a_lookup() {
+  if command -v dig >/dev/null 2>&1; then
+    dig +time=$dns_timeout +tries=1 +short A "$1" 2>/dev/null | dig_short_clean
+  fi
+}
+
+dns_aaaa_lookup() {
+  if command -v dig >/dev/null 2>&1; then
+    dig +time=$dns_timeout +tries=1 +short AAAA "$1" 2>/dev/null | dig_short_clean
+  fi
+}
+
+ping4_host() {
+  ping -c1 -W"$ping_timeout" "$1" >/dev/null 2>&1
+}
+
+ping6_host() {
+  local target="$1"
+  local iface="${2:-}"
+  # macOS/BSD ping6 has no reply timeout flag (-W/-w mean something else); use -c1 only.
+  case "$(uname -s)" in
+    Darwin|*BSD*)
+      if [[ -n "$iface" ]]; then
+        ping6 -c1 -b "$iface" "$target" >/dev/null 2>&1
+      else
+        ping6 -c1 "$target" >/dev/null 2>&1
+      fi
+      ;;
+    *)
+      if [[ -n "$iface" ]]; then
+        ping -6 -c1 -W"$ping_timeout" -I "$iface" "$target" >/dev/null 2>&1
+      else
+        ping -6 -c1 -W"$ping_timeout" "$target" >/dev/null 2>&1
+      fi
+      ;;
+  esac
+}
+
+ipv6_same() {
+  local a="$1" b="$2"
+  [[ -n "$a" && -n "$b" ]] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import ipaddress; exit(0 if ipaddress.ip_address('$a') == ipaddress.ip_address('$b') else 1)" 2>/dev/null
+    return $?
+  fi
+  [[ "$(printf '%s' "$a" | tr 'A-F' 'a-f')" == "$(printf '%s' "$b" | tr 'A-F' 'a-f')" ]]
+}
+
+ipv4_in_subnet() {
+  local ip="$1" cidr="$2"
+  local net_part="${cidr%/*}" mask_bits="${cidr#*/}"
+  local net1 net2 net3 net4 ip1 ip2 ip3 ip4
+  IFS=. read -r net1 net2 net3 net4 <<< "$net_part"
+  IFS=. read -r ip1 ip2 ip3 ip4 <<< "$ip"
+  local host_bits=$((32 - mask_bits))
+  local num_hosts=$((2 ** host_bits))
+  local net_dec=$((net1 * 16777216 + net2 * 65536 + net3 * 256 + net4))
+  local ip_dec=$((ip1 * 16777216 + ip2 * 65536 + ip3 * 256 + ip4))
+  net_dec=$(( net_dec & ~(num_hosts - 1) ))
+  ip_dec=$(( ip_dec & ~(num_hosts - 1) ))
+  (( net_dec == ip_dec ))
+}
+
+# First four hextets of the interface's global /64 (e.g. 2601:441:8483:b502)
+extract_prefix64_base() {
+  local addr_cidr="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import ipaddress; n=ipaddress.ip_network('$addr_cidr', strict=False); print(':'.join(str(n.network_address).split(':')[:4]))" 2>/dev/null
+    return $?
+  fi
+  local addr="${addr_cidr%%/*}"
+  IFS=: read -r h1 h2 h3 h4 _ <<< "$addr"
+  echo "${h1}:${h2}:${h3}:${h4}"
+}
+
+ipv6_scan_iface=""
+
+# Read global /64 + IPv4 from an interface (best-effort).
+iface_ipv6_cidr() {
+  local iface="$1" v6_cidr="" ipv4_addr=""
+  case "$(uname -s)" in
+    Darwin|*BSD*)
+      v6_cidr=$(ifconfig "$iface" 2>/dev/null | awk '/inet6 / && $2 !~ /^fe80:/ && $2 !~ /^::1/ && $4 == 64 {print $2"/"$4; exit}')
+      ipv4_addr=$(ifconfig "$iface" 2>/dev/null | awk '/inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ && $2 != "127.0.0.1" {print $2; exit}')
+      ;;
+    Linux)
+      v6_cidr=$(ip -6 -o addr show dev "$iface" scope global 2>/dev/null | awk '{split($4,a,"/"); if(a[2]==64) print $4; exit}')
+      ipv4_addr=$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)
+      ;;
+  esac
+  [[ -n "$v6_cidr" && "$v6_cidr" != */ ]] || return 1
+  printf '%s\t%s\n' "$v6_cidr" "${ipv4_addr:-}"
+}
+
+# Aligned /64 for the scanned subnet: PD stem from this host + VLAN = IPv4 3rd octet.
+# e.g. local b508 on 10.0.8.x + scan 10.0.10.0/24 -> 2601:441:8483:b501
+find_local_ipv6_context() {
+  local cidr="$1"
+  local probe_ip="${cidr%/*}"
+  local match_iface="" iface ipv4_addr v6_cidr prefix_base
+  local net_o1 net_o2 target_vlan h1 h2 h3 h4 stem hextet_len
+
+  ipv6_scan_iface=""
+  if [[ "$probe_ip" == 127.* ]]; then
+    return 1
+  fi
+
+  IFS=. read -r net_o1 net_o2 target_vlan _ <<< "$probe_ip"
+  if [[ "$net_o1" != "10" || "$net_o2" != "0" ]] || [[ -z "$target_vlan" ]]; then
+    echo "Error: --v6 aligned prefix expects 10.0.VLAN.0/CIDR (got ${cidr})" >&2
+    return 1
+  fi
+
+  case "$(uname -s)" in
+    Darwin|*BSD*)
+      for iface in $(ifconfig -l 2>/dev/null); do
+        [[ "$iface" == lo* ]] && continue
+        ipv4_addr=$(ifconfig "$iface" 2>/dev/null | awk '/inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ && $2 != "127.0.0.1" {print $2; exit}')
+        if [[ -n "$ipv4_addr" ]] && ipv4_in_subnet "$ipv4_addr" "$cidr"; then
+          match_iface="$iface"
+          break
+        fi
+      done
+      if [[ -z "$match_iface" ]]; then
+        match_iface=$(route -n get -inet "$probe_ip" 2>/dev/null | awk '/interface:/{print $2}')
+        [[ "$match_iface" == lo* ]] && match_iface=""
+      fi
+      if [[ -n "$match_iface" ]]; then
+        IFS=$'\t' read -r v6_cidr ipv4_addr < <(iface_ipv6_cidr "$match_iface") || v6_cidr=""
+      fi
+      if [[ -z "$v6_cidr" ]]; then
+        for iface in $(ifconfig -l 2>/dev/null); do
+          [[ "$iface" == lo* ]] && continue
+          if IFS=$'\t' read -r v6_cidr ipv4_addr < <(iface_ipv6_cidr "$iface"); then
+            ipv6_scan_iface="$iface"
+            break
+          fi
+        done
+      else
+        ipv6_scan_iface="$match_iface"
+      fi
+      ;;
+    Linux)
+      while IFS= read -r line; do
+        iface=$(awk '{print $2}' <<< "$line" | sed 's/:$//')
+        [[ "$iface" == lo* ]] && continue
+        ipv4_addr=$(awk '{print $4}' <<< "$line" | cut -d/ -f1)
+        if [[ -n "$ipv4_addr" && "$ipv4_addr" != "127.0.0.1" ]] && ipv4_in_subnet "$ipv4_addr" "$cidr"; then
+          match_iface="$iface"
+          break
+        fi
+      done < <(ip -4 -o addr show scope global 2>/dev/null)
+      if [[ -z "$match_iface" ]]; then
+        match_iface=$(ip route get "$probe_ip" 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+        [[ "$match_iface" == lo* ]] && match_iface=""
+      fi
+      if [[ -n "$match_iface" ]]; then
+        IFS=$'\t' read -r v6_cidr ipv4_addr < <(iface_ipv6_cidr "$match_iface") || v6_cidr=""
+      fi
+      if [[ -z "$v6_cidr" ]]; then
+        while IFS= read -r line; do
+          iface=$(awk '{print $2}' <<< "$line" | sed 's/:$//')
+          [[ "$iface" == lo* ]] && continue
+          if IFS=$'\t' read -r v6_cidr ipv4_addr < <(iface_ipv6_cidr "$iface"); then
+            ipv6_scan_iface="$iface"
+            break
+          fi
+        done < <(ip -6 -o addr show scope global 2>/dev/null)
+      else
+        ipv6_scan_iface="$match_iface"
+      fi
+      ;;
+  esac
+
+  if [[ -z "$v6_cidr" ]]; then
+    return 1
+  fi
+
+  prefix_base=$(extract_prefix64_base "$v6_cidr")
+  [[ -n "$prefix_base" && "$prefix_base" != "::1" ]] || return 1
+
+  IFS=: read -r h1 h2 h3 h4 <<< "$prefix_base"
+  hextet_len=${#h4}
+  if (( hextet_len < 2 )); then
+    echo "Error: --v6 cannot parse VLAN from IPv6 hextet '${h4}' (from ${v6_cidr})" >&2
+    return 1
+  fi
+  # 4th hextet: shared stem + one VLAN digit (b502 = VLAN 2, b508 = VLAN 8).
+  # VLAN >= 10 drops the ones digit: VLAN 10 -> b501, VLAN 24 -> b502.
+  local vlan_digit="$target_vlan"
+  if (( target_vlan >= 10 )); then
+    vlan_digit=$(( target_vlan / 10 ))
+  fi
+  stem="${h4:0:$(( hextet_len - 1 ))}"
+  printf '%s\n' "${h1}:${h2}:${h3}:${stem}${vlan_digit}"
+  return 0
+}
+
+aligned_ipv6_address() {
+  local ipv4="$1" prefix64="$2"
+  echo "${prefix64}::${ipv4##*.}"
+}
+
+status_arrow() {
+  if [[ "$1" == "up" ]]; then
+    if [ "$USE_COLOR" = true ]; then
+      printf '%b' "${GREEN}↑${NC}"
+    else
+      printf '↑'
+    fi
+  else
+    if [ "$USE_COLOR" = true ]; then
+      printf '%b' "${RED}↓${NC}"
+    else
+      printf '↓'
+    fi
+  fi
+}
+
+ipv6_addr_label() {
+  local addr="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import ipaddress; print(ipaddress.ip_address('$addr').compressed)" 2>/dev/null && return
+  fi
+  printf '%s' "$addr"
+}
+
+dns_alignment_note() {
+  local ip="$1" host_id="$2" dns_align="$3" a_record="$4" aaaa_record="$5"
+  local aligned_v6="$6" dns_v6_addr="$7" dns_v6_status="$8"
+  local note="" aaaa_lbl aligned_lbl
+  case "$dns_align" in
+    mismatch)
+      aaaa_lbl=$(ipv6_addr_label "$aaaa_record")
+      aligned_lbl=$(ipv6_addr_label "$aligned_v6")
+      if [[ "$aaaa_lbl" == "$aligned_lbl" ]]; then
+        note="${YELLOW}AAAA ${aaaa_record} != ${aligned_v6}"
+      else
+        note="${YELLOW}AAAA ${aaaa_lbl} != ${aligned_lbl}"
+      fi
+      if [[ "$dns_v6_status" == "up" ]]; then
+        note="${note} (ping ok)${NC}"
+      else
+        note="${note}${NC}"
+      fi
+      ;;
+    a-mismatch)
+      note="${YELLOW}A ${a_record} != ${ip}${NC}"
+      ;;
+  esac
+  if [[ -z "$note" && -n "$dns_v6_addr" && "$dns_v6_addr" != "$aligned_v6" && "$dns_v6_status" == "up" ]]; then
+    note="${YELLOW}AAAA only $(ipv6_addr_label "$dns_v6_addr") (ping ok)${NC}"
+  fi
+  printf '%s' "$note"
 }
 
 # Progress spinner function
@@ -65,6 +325,8 @@ subnet=""
 filter=""
 quiet=false
 dry_run=false
+scan_ipv6=false
+RECORD_FS=$'\x1e'
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -93,6 +355,10 @@ while [[ $# -gt 0 ]]; do
       filter="$2"
       shift 2
       ;;
+    --v6)
+      scan_ipv6=true
+      shift
+      ;;
     -v|--version)
       echo "pingsweep $PINGSWEEP_VERSION"
       exit 0
@@ -106,6 +372,7 @@ while [[ $# -gt 0 ]]; do
       echo "  -q, --quiet            Quiet mode - suppress progress output"
       echo "  -n, --dry-run          Show IPs that would be scanned without scanning"
       echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
+      echo "      --v6              Parallel aligned IPv6 probes and DNS alignment checks (see README)"
       echo "  -v, --version         Show version information"
       echo "  -h, --help            Show this help message"
       echo "Example: pingsweep 192.168.1.0/24"
@@ -113,6 +380,7 @@ while [[ $# -gt 0 ]]; do
       echo "         pingsweep -j 100 192.168.1.0/24"
       echo "         pingsweep -s 'router*' 192.168.1.0/24"
       echo "         pingsweep --search 're:^192\\.168\\.1\\.[0-9]+ up' 192.168.1.0/24"
+      echo "         pingsweep --v6 10.0.2.0/24"
       exit 0
       ;;
     *)
@@ -123,6 +391,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 check_requirements
+
+if [ "$scan_ipv6" = true ] && ! command -v dig >/dev/null 2>&1; then
+  echo "Warning: 'dig' not found; --v6 will ping aligned addresses but skip DNS alignment checks." >&2
+fi
 
 # Derive per-tool timeouts from the user-facing seconds value. dig's +time is
 # always seconds; ping's -W is milliseconds on macOS/BSD but seconds on Linux.
@@ -145,38 +417,51 @@ if [ -z "$subnet" ]; then
   exit 1
 fi
 
-# Comprehensive IP range generator that replicates most prips functionality
-generate_ips() {
+validate_ipv4_cidr() {
   local subnet="$1"
-  local output_file="$2"
-  
-  # Validate CIDR format
-  if [[ ! "$subnet" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+
+  if [[ ! "$subnet" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]]; then
     echo "Error: Invalid CIDR format: $subnet" >&2
     return 1
   fi
-  
-  # Parse CIDR notation (parameter expansion avoids subshell overhead)
+
   local ip_part="${subnet%/*}"
   local cidr="${subnet#*/}"
-  
-  # Validate CIDR range
+
   if (( cidr < 0 || cidr > 32 )); then
     echo "Error: CIDR must be between 0 and 32: $cidr" >&2
     return 1
   fi
-  
-  # Parse IP address octets (single read avoids four cut subshells)
+
   local ip1 ip2 ip3 ip4
   IFS=. read -r ip1 ip2 ip3 ip4 <<< "$ip_part"
-  
-  # Validate IP octets
+
   for octet in "$ip1" "$ip2" "$ip3" "$ip4"; do
     if (( octet < 0 || octet > 255 )); then
       echo "Error: Invalid IP octet: $octet" >&2
       return 1
     fi
   done
+
+  return 0
+}
+
+# Comprehensive IP range generator that replicates most prips functionality
+generate_ips() {
+  local subnet="$1"
+  local output_file="$2"
+
+  if ! validate_ipv4_cidr "$subnet"; then
+    return 1
+  fi
+
+  # Parse CIDR notation (parameter expansion avoids subshell overhead)
+  local ip_part="${subnet%/*}"
+  local cidr="${subnet#*/}"
+
+  # Parse IP address octets (single read avoids four cut subshells)
+  local ip1 ip2 ip3 ip4
+  IFS=. read -r ip1 ip2 ip3 ip4 <<< "$ip_part"
   
   # Convert IP to decimal
   local base_ip=$((ip1 * 256 * 256 * 256 + ip2 * 256 * 256 + ip3 * 256 + ip4))
@@ -215,6 +500,10 @@ generate_ips() {
   return 0
 }
 
+if ! validate_ipv4_cidr "$subnet"; then
+  exit 1
+fi
+
 # Detect if prips is available for faster IP generation
 use_prips=false
 if command -v prips >/dev/null 2>&1; then
@@ -231,7 +520,9 @@ fi
 if [ "$use_prips" != true ] || [ "$total_ips" -eq 0 ]; then
   temp_ip_file=$(mktemp)
   trap 'rm -f "$temp_ip_file"' EXIT  # clean up if interrupted during counting
-  generate_ips "$subnet" "$temp_ip_file"
+  if ! generate_ips "$subnet" "$temp_ip_file"; then
+    exit 1
+  fi
   total_ips=$(wc -l < "$temp_ip_file")
   rm -f "$temp_ip_file"
 fi
@@ -242,10 +533,12 @@ if [ "$total_ips" -gt 256 ] && [ "$quiet" = false ]; then
 fi
 
 if [[ "$format" == "text" ]] && [ "$quiet" = false ]; then
+  ipv6_banner=""
+  [[ "$scan_ipv6" == true ]] && ipv6_banner=" with IPv6"
   if [ "$show_progress" = true ]; then
-    echo "Scanning $subnet ($total_ips IPs)..." >&2
+    echo "Scanning $subnet ($total_ips IPs)${ipv6_banner}..." >&2
   else
-    echo "Scanning $subnet..." >&2
+    echo "Scanning $subnet${ipv6_banner}..." >&2
   fi
 fi
 
@@ -265,23 +558,52 @@ trap "rm -f '$results_file' '$results_file.ips'" EXIT # Ensure temp files are cl
 if [ "$use_prips" = true ]; then
   if ! prips "$subnet" > "$results_file.ips" 2>/dev/null; then
     # prips failed (e.g., invalid network boundary), fall back to built-in
-    generate_ips "$subnet" "$results_file.ips"
+    if ! generate_ips "$subnet" "$results_file.ips"; then
+      exit 1
+    fi
   fi
 else
-  generate_ips "$subnet" "$results_file.ips"
+  if ! generate_ips "$subnet" "$results_file.ips"; then
+    exit 1
+  fi
 fi
 
 # If dry-run mode, just display IPs and exit
 if [ "$dry_run" = true ]; then
   echo "Dry-run mode: IPs that would be scanned:"
-  cat "$results_file.ips"
+  if [ "$scan_ipv6" = true ]; then
+    ipv6_prefix64=$(find_local_ipv6_context "$subnet") || {
+      echo "Error: --v6 could not determine a local global IPv6 /64 for $subnet" >&2
+      echo "Scan from a host with IPv4 and IPv6 on the target VLAN/subnet." >&2
+      exit 1
+    }
+    echo "IPv6 prefix (from this host): ${ipv6_prefix64}::/64"
+    while IFS= read -r ip; do
+      echo "$ip  ->  $(aligned_ipv6_address "$ip" "$ipv6_prefix64")"
+    done < "$results_file.ips"
+  else
+    cat "$results_file.ips"
+  fi
   echo
   echo "Total: $total_ips IPs"
   exit 0
 fi
 
+ipv6_prefix64=""
+if [ "$scan_ipv6" = true ]; then
+  ipv6_prefix64=$(find_local_ipv6_context "$subnet") || {
+    echo "Error: --v6 could not determine a local global IPv6 /64 for $subnet" >&2
+    echo "Scan from a host with IPv4 and IPv6 on the target VLAN/subnet." >&2
+    exit 1
+  }
+  if [[ "$format" == "text" ]] && [ "$quiet" = false ]; then
+    echo "IPv6 aligned prefix: ${ipv6_prefix64}::/64 (host-id = last IPv4 octet)" >&2
+  fi
+fi
+
 GREEN=$'\033[0;32m'
 RED=$'\033[0;31m'
+YELLOW=$'\033[0;33m'
 NC=$'\033[0m'  # No Color
 STATUS_PAD=12  # Padding for status column
 
@@ -292,22 +614,84 @@ else
   USE_COLOR=false
   GREEN=""
   RED=""
+  YELLOW=""
   NC=""
 fi
 
 # Process IPs with batched concurrency (inline blocks to avoid job table overflow)
 while IFS= read -r ip; do
-  # Launch scan in background using inline block (more efficient than function call)
-  {
-    if ping -c1 -W$ping_timeout "$ip" >/dev/null 2>&1; then
-      hostname=$(dns_lookup "$ip")
-      if [[ -n "$hostname" ]]; then
-        echo "$ip up $hostname" >> "$results_file"
-      else
-        echo "$ip up" >> "$results_file"
+  if [ "$scan_ipv6" = true ]; then
+    aligned_v6=$(aligned_ipv6_address "$ip" "$ipv6_prefix64")
+    {
+      v4_up=false
+      v6_up=false
+      ping4_host "$ip" & pid4=$!
+      ping6_host "$aligned_v6" "$ipv6_scan_iface" & pid6=$!
+      wait "$pid4" && v4_up=true
+      wait "$pid6" && v6_up=true
+
+      hostname=""
+      a_record=""
+      aaaa_record=""
+      dns_align="no-name"
+      dns_v6_up=false
+      dns_v6_addr=""
+
+      if $v4_up; then
+        hostname=$(dns_lookup "$ip")
       fi
-    fi
-  } &
+      if [[ -z "$hostname" ]] && $v6_up; then
+        hostname=$(dns_lookup "$aligned_v6")
+      fi
+
+      if [[ -n "$hostname" ]]; then
+        a_record=$(dns_a_lookup "$hostname")
+        aaaa_record=$(dns_aaaa_lookup "$hostname")
+        if [[ -n "$aaaa_record" ]]; then
+          if ipv6_same "$aaaa_record" "$aligned_v6"; then
+            dns_align="aligned"
+            dns_v6_addr="$aaaa_record"
+            dns_v6_up=$v6_up
+          else
+            dns_align="mismatch"
+            dns_v6_addr="$aaaa_record"
+            ping6_host "$aaaa_record" "$ipv6_scan_iface" && dns_v6_up=true
+          fi
+        else
+          dns_align="no-aaaa"
+        fi
+        if [[ -n "$a_record" && "$a_record" != "$ip" ]]; then
+          if [[ "$dns_align" == "aligned" ]]; then
+            dns_align="a-mismatch"
+          elif [[ "$dns_align" == "no-aaaa" || "$dns_align" == "no-name" ]]; then
+            dns_align="a-mismatch"
+          fi
+        fi
+      fi
+
+      if $v4_up || $v6_up || $dns_v6_up; then
+        v4_status=$($v4_up && echo up || echo down)
+        v6_status=$($v6_up && echo up || echo down)
+        dns_v6_status=""
+        [[ -n "$dns_v6_addr" ]] && dns_v6_status=$($dns_v6_up && echo up || echo down)
+        printf '%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\n' \
+          "$ip" "$v4_status" "$v6_status" "$aligned_v6" \
+          "$hostname" "$a_record" "$aaaa_record" "$dns_align" "$dns_v6_status" "$dns_v6_addr" \
+          >> "$results_file"
+      fi
+    } &
+  else
+    {
+      if ping4_host "$ip"; then
+        hostname=$(dns_lookup "$ip")
+        if [[ -n "$hostname" ]]; then
+          echo "$ip up $hostname" >> "$results_file"
+        else
+          echo "$ip up" >> "$results_file"
+        fi
+      fi
+    } &
+  fi
   
   ((count++))
 
@@ -380,95 +764,190 @@ if [ -s "$results_file" ]; then
   fi
   case "$format" in
     "csv")
-      echo "IP,Status,Hostname"
-      while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        ip=$(echo "$line" | cut -d' ' -f1)
-        host_status=$(echo "$line" | cut -d' ' -f2)
-        hostname=$(echo "$line" | cut -d' ' -f3- -s)
-        # Escape quotes in hostname for CSV
-        hostname=$(echo "$hostname" | sed 's/"/""/g')
-        if [[ -n "$hostname" ]]; then
-          echo "$ip,$host_status,\"$hostname\""
-        else
-          echo "$ip,$host_status,"
-        fi
-      done <<< "$filtered_results"
+      if [ "$scan_ipv6" = true ]; then
+        echo "IP,IPv4,IPv6_Aligned,IPv6_Status,Hostname,A_Record,AAAA,DNS_Alignment,DNS_IPv6,DNS_IPv6_Status"
+        while IFS=$'\x1e' read -r ip v4_status v6_status aligned_v6 hostname a_record aaaa_record dns_align dns_v6_status dns_v6_addr; do
+          [[ -z "$ip" ]] && continue
+          hostname=${hostname//\"/\"\"}
+          a_record=${a_record//\"/\"\"}
+          aaaa_record=${aaaa_record//\"/\"\"}
+          dns_v6_addr=${dns_v6_addr//\"/\"\"}
+          printf '%s,%s,%s,%s,"%s","%s","%s",%s,"%s","%s"\n' \
+            "$ip" "$v4_status" "$aligned_v6" "$v6_status" "$hostname" "$a_record" \
+            "$aaaa_record" "$dns_align" "$dns_v6_addr" "$dns_v6_status"
+        done <<< "$filtered_results"
+      else
+        echo "IP,Status,Hostname"
+        while IFS= read -r line; do
+          [[ -z "$line" ]] && continue
+          ip=$(echo "$line" | cut -d' ' -f1)
+          host_status=$(echo "$line" | cut -d' ' -f2)
+          hostname=$(echo "$line" | cut -d' ' -f3- -s)
+          hostname=$(echo "$hostname" | sed 's/"/""/g')
+          if [[ -n "$hostname" ]]; then
+            echo "$ip,$host_status,\"$hostname\""
+          else
+            echo "$ip,$host_status,"
+          fi
+        done <<< "$filtered_results"
+      fi
       ;;
     "json")
       echo "{"
       echo "  \"results\": ["
       first=true
-      while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        if [[ "$first" != true ]]; then
-          echo ","
-        fi
-        first=false
-        # Split line into fields
-        ip=$(echo "$line" | cut -d' ' -f1)
-        host_status=$(echo "$line" | cut -d' ' -f2)
-        hostname=$(echo "$line" | cut -d' ' -f3- -s)
-        if [[ -n "$hostname" ]]; then
-          # Escape backslashes then quotes so unusual PTR records stay valid JSON
-          esc_hostname=${hostname//\\/\\\\}
-          esc_hostname=${esc_hostname//\"/\\\"}
-          printf '    {"ip": "%s", "status": "%s", "hostname": "%s"}' \
-            "$ip" "$host_status" "$esc_hostname"
-        else
-          printf '    {"ip": "%s", "status": "%s"}' "$ip" "$host_status"
-        fi
-      done <<< "$filtered_results"
+      if [ "$scan_ipv6" = true ]; then
+        while IFS=$'\x1e' read -r ip v4_status v6_status aligned_v6 hostname a_record aaaa_record dns_align dns_v6_status dns_v6_addr; do
+          [[ -z "$ip" ]] && continue
+          if [[ "$first" != true ]]; then
+            echo ","
+          fi
+          first=false
+          esc_hostname=${hostname//\\/\\\\}; esc_hostname=${esc_hostname//\"/\\\"}
+          esc_a=${a_record//\\/\\\\}; esc_a=${esc_a//\"/\\\"}
+          esc_aaaa=${aaaa_record//\\/\\\\}; esc_aaaa=${esc_aaaa//\"/\\\"}
+          esc_dns_v6=${dns_v6_addr//\\/\\\\}; esc_dns_v6=${esc_dns_v6//\"/\\\"}
+          esc_aligned=${aligned_v6//\\/\\\\}; esc_aligned=${esc_aligned//\"/\\\"}
+          printf '    {"ip": "%s", "ipv4": "%s", "ipv6_aligned": "%s", "ipv6_status": "%s"' \
+            "$ip" "$v4_status" "$esc_aligned" "$v6_status"
+          if [[ -n "$hostname" ]]; then
+            printf ', "hostname": "%s"' "$esc_hostname"
+          fi
+          if [[ -n "$a_record" ]]; then
+            printf ', "a_record": "%s"' "$esc_a"
+          fi
+          if [[ -n "$aaaa_record" ]]; then
+            printf ', "aaaa": "%s"' "$esc_aaaa"
+          fi
+          printf ', "dns_alignment": "%s"' "$dns_align"
+          if [[ -n "$dns_v6_addr" ]]; then
+            printf ', "dns_ipv6": "%s", "dns_ipv6_status": "%s"' "$esc_dns_v6" "$dns_v6_status"
+          fi
+          printf '}'
+        done <<< "$filtered_results"
+      else
+        while IFS= read -r line; do
+          [[ -z "$line" ]] && continue
+          if [[ "$first" != true ]]; then
+            echo ","
+          fi
+          first=false
+          ip=$(echo "$line" | cut -d' ' -f1)
+          host_status=$(echo "$line" | cut -d' ' -f2)
+          hostname=$(echo "$line" | cut -d' ' -f3- -s)
+          if [[ -n "$hostname" ]]; then
+            esc_hostname=${hostname//\\/\\\\}
+            esc_hostname=${esc_hostname//\"/\\\"}
+            printf '    {"ip": "%s", "status": "%s", "hostname": "%s"}' \
+              "$ip" "$host_status" "$esc_hostname"
+          else
+            printf '    {"ip": "%s", "status": "%s"}' "$ip" "$host_status"
+          fi
+        done <<< "$filtered_results"
+      fi
       echo
       echo "  ],"
       echo "  \"stats\": {"
       printf '    "total_hosts": %d,\n' "$live_hosts"
+      if [ "$scan_ipv6" = true ]; then
+        esc_prefix=${ipv6_prefix64//\\/\\\\}; esc_prefix=${esc_prefix//\"/\\\"}
+        printf '    "ipv6_prefix64": "%s::/64",\n' "$esc_prefix"
+      fi
       printf '    "scan_time_seconds": %d\n' "$((end_time-start_time))"
       echo "  }"
       echo "}"
       ;;
     "yaml")
-      echo "results:"
-      while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        # Split line into fields
-        ip=$(echo "$line" | cut -d' ' -f1)
-        host_status=$(echo "$line" | cut -d' ' -f2)
-        hostname=$(echo "$line" | cut -d' ' -f3- -s)
-        if [[ -n "$hostname" ]]; then
-          # Quote and escape so special characters stay valid YAML
-          esc_hostname=${hostname//\\/\\\\}
-          esc_hostname=${esc_hostname//\"/\\\"}
-          printf '  - ip: %s\n    status: %s\n    hostname: "%s"\n' \
-            "$ip" "$host_status" "$esc_hostname"
-        else
-          printf '  - ip: %s\n    status: %s\n' "$ip" "$host_status"
-        fi
-      done <<< "$filtered_results"
+      if [ "$scan_ipv6" = true ]; then
+        echo "results:"
+        while IFS=$'\x1e' read -r ip v4_status v6_status aligned_v6 hostname a_record aaaa_record dns_align dns_v6_status dns_v6_addr; do
+          [[ -z "$ip" ]] && continue
+          esc_hostname=${hostname//\\/\\\\}; esc_hostname=${esc_hostname//\"/\\\"}
+          esc_a=${a_record//\\/\\\\}; esc_a=${esc_a//\"/\\\"}
+          esc_aaaa=${aaaa_record//\\/\\\\}; esc_aaaa=${esc_aaaa//\"/\\\"}
+          esc_dns_v6=${dns_v6_addr//\\/\\\\}; esc_dns_v6=${esc_dns_v6//\"/\\\"}
+          printf '  - ip: %s\n    ipv4: %s\n    ipv6_aligned: "%s"\n    ipv6_status: %s\n' \
+            "$ip" "$v4_status" "$aligned_v6" "$v6_status"
+          [[ -n "$hostname" ]] && printf '    hostname: "%s"\n' "$esc_hostname"
+          [[ -n "$a_record" ]] && printf '    a_record: "%s"\n' "$esc_a"
+          [[ -n "$aaaa_record" ]] && printf '    aaaa: "%s"\n' "$esc_aaaa"
+          printf '    dns_alignment: %s\n' "$dns_align"
+          [[ -n "$dns_v6_addr" ]] && printf '    dns_ipv6: "%s"\n    dns_ipv6_status: %s\n' "$esc_dns_v6" "$dns_v6_status"
+        done <<< "$filtered_results"
+      else
+        echo "results:"
+        while IFS= read -r line; do
+          [[ -z "$line" ]] && continue
+          ip=$(echo "$line" | cut -d' ' -f1)
+          host_status=$(echo "$line" | cut -d' ' -f2)
+          hostname=$(echo "$line" | cut -d' ' -f3- -s)
+          if [[ -n "$hostname" ]]; then
+            esc_hostname=${hostname//\\/\\\\}
+            esc_hostname=${esc_hostname//\"/\\\"}
+            printf '  - ip: %s\n    status: %s\n    hostname: "%s"\n' \
+              "$ip" "$host_status" "$esc_hostname"
+          else
+            printf '  - ip: %s\n    status: %s\n' "$ip" "$host_status"
+          fi
+        done <<< "$filtered_results"
+      fi
       echo "stats:"
       printf '  total_hosts: %d\n' "$live_hosts"
+      if [ "$scan_ipv6" = true ]; then
+        printf '  ipv6_prefix64: "%s::/64"\n' "$ipv6_prefix64"
+      fi
       printf '  scan_time_seconds: %d\n' "$((end_time-start_time))"
       ;;
     *)
-      while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        ip=$(echo "$line" | cut -d' ' -f1)
-        host_status=$(echo "$line" | cut -d' ' -f2)
-        hostname=$(echo "$line" | cut -d' ' -f3- -s)
-        if [[ "$host_status" == "up" ]]; then
+      if [ "$scan_ipv6" = true ]; then
+        while IFS=$'\x1e' read -r ip v4_status v6_status aligned_v6 hostname a_record aaaa_record dns_align dns_v6_status dns_v6_addr; do
+          [[ -z "$ip" ]] && continue
+          v4_arrow=$(status_arrow "$v4_status")
+          v6_arrow=$(status_arrow "$v6_status")
+          host_id="::${ip##*.}"
+          note=$(dns_alignment_note "$ip" "$host_id" "$dns_align" "$a_record" "$aaaa_record" "$aligned_v6" "$dns_v6_addr" "$dns_v6_status")
           if [[ -n "$hostname" ]]; then
-            printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${GREEN}${host_status}${NC}      " "$hostname"
+            if [[ -n "$note" ]]; then
+              printf "%-15s  v4: %b   v6: %b %-8s  %s  %b\n" \
+                "$ip" "$v4_arrow" "$v6_arrow" "$host_id" "$hostname" "$note"
+            else
+              printf "%-15s  v4: %b   v6: %b %-8s  %s\n" \
+                "$ip" "$v4_arrow" "$v6_arrow" "$host_id" "$hostname"
+            fi
           else
-            printf "%-15s  %-${STATUS_PAD}s\n" "$ip" "${GREEN}${host_status}${NC}      "
+            if [[ -n "$note" ]]; then
+              printf "%-15s  v4: %b   v6: %b %-8s  %b\n" \
+                "$ip" "$v4_arrow" "$v6_arrow" "$host_id" "$note"
+            else
+              printf "%-15s  v4: %b   v6: %b %-8s\n" \
+                "$ip" "$v4_arrow" "$v6_arrow" "$host_id"
+            fi
           fi
-        else
-          printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${RED}${host_status}${NC}    " "$hostname"
-        fi
-      done <<< "$filtered_results"
+        done <<< "$filtered_results"
+      else
+        while IFS= read -r line; do
+          [[ -z "$line" ]] && continue
+          ip=$(echo "$line" | cut -d' ' -f1)
+          host_status=$(echo "$line" | cut -d' ' -f2)
+          hostname=$(echo "$line" | cut -d' ' -f3- -s)
+          if [[ "$host_status" == "up" ]]; then
+            if [[ -n "$hostname" ]]; then
+              printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${GREEN}${host_status}${NC}      " "$hostname"
+            else
+              printf "%-15s  %-${STATUS_PAD}s\n" "$ip" "${GREEN}${host_status}${NC}      "
+            fi
+          else
+            printf "%-15s  %-${STATUS_PAD}s%s\n" "$ip" "${RED}${host_status}${NC}    " "$hostname"
+          fi
+        done <<< "$filtered_results"
+      fi
       if [ "$quiet" = false ]; then
         echo
         echo "Found ${live_hosts} hosts in $((end_time-start_time))s"
       fi
       ;;
   esac
+elif [[ "$format" == "text" ]] && [ "$quiet" = false ]; then
+  echo
+  echo "Found 0 hosts in $((end_time-start_time))s"
 fi
