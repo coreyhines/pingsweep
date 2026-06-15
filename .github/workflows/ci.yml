@@ -24,11 +24,16 @@ jobs:
           ./pingsweep -v | grep -q '^pingsweep [0-9]\+\.[0-9]\+\.[0-9]\+$'
 
       - name: Help flag
-        run: ./pingsweep --help | grep -q 'Usage: pingsweep'
+        run: './pingsweep --help | grep -q "Usage: pingsweep"'
 
       - name: Dry-run smoke test
         run: |
           ./pingsweep -n -q 127.0.0.1/32 | grep -q '^127\.0\.0\.1$'
+
+      - name: IPv6 map dry-run smoke test
+        run: |
+          printf '192.168.1.0/24\t2601:441:8483:b500\n' > /tmp/pingsweep-ipv6-map
+          ./pingsweep -n -q --v6 --v6-map /tmp/pingsweep-ipv6-map 192.168.1.0/30 | grep -q '2601:441:8483:b500::'
 
   release:
     if: >-

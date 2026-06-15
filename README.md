@@ -44,6 +44,7 @@ This copies the script to `~/.local/bin/pingsweep`, adds a wrapper to `~/.zshfun
   -n, --dry-run          List IPs without scanning
   -s, --search PATTERN   Filter output (substring, wildcards, or re:regex)
       --v6               Parallel aligned IPv6 probes and DNS alignment checks
+      --v6-map FILE      IPv4-CIDR to IPv6-/64 map file (see README)
   -v, --version          Show version
   -h, --help             Show help
 ```
@@ -85,6 +86,36 @@ Dry-run shows aligned targets:
 ```bash
 pingsweep -n --v6 10.0.2.0/29
 ```
+
+### IPv6 map (non-standard subnets)
+
+Auto `--v6` mode derives the IPv6 `/64` from **this host’s** addresses and assumes IPv4 subnets look like `10.0.VLAN.0/CIDR`, where the VLAN digit is encoded in the fourth IPv6 hextet (`b502` = VLAN 2, `b508` = VLAN 8).
+
+Some sites have **exceptions** — for example VLAN 1 on `192.168.1.0/24` with IPv6 `2601:441:8483:b500::/64` instead of `10.0.1.0/24`. Add a user-space map so `--v6` still aligns `::N` from the last IPv4 octet.
+
+**Map file format** (whitespace-separated, `#` comments):
+
+```
+192.168.1.0/24  2601:441:8483:b500
+```
+
+**Lookup order:**
+
+1. `--v6-map /path/to/file`
+2. `$PINGSWEEP_IPV6_MAP`
+3. `$XDG_CONFIG_HOME/pingsweep/ipv6-map`
+4. `~/.config/pingsweep/ipv6-map`
+
+Copy `examples/ipv6-map.example` as a starting point:
+
+```bash
+mkdir -p ~/.config/pingsweep
+cp examples/ipv6-map.example ~/.config/pingsweep/ipv6-map
+# edit entries for your site
+pingsweep --v6 192.168.1.0/24
+```
+
+Host-id alignment is unchanged: `192.168.1.4` probes `2601:441:8483:b500::4`. Wrappers that translate VLAN numbers to CIDR (e.g. `sweep 1 --v6` → `192.168.1.0/24`) work once the map entry exists.
 
 ## Examples
 

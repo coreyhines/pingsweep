@@ -1,0 +1,22 @@
+# IPv6 alignment map for pingsweep --v6
+#
+# One mapping per line:
+#   <IPv4-CIDR>  <IPv6-/64-base>
+#
+# IPv4 CIDR is the subnet you scan (network form recommended).
+# IPv6 base is four hextets only (no ::/64 suffix). Host-id is still the
+# last IPv4 octet: 192.168.1.4 -> {base}::4
+#
+# Lookup order:
+#   1. --v6-map FILE
+#   2. $PINGSWEEP_IPV6_MAP
+#   3. $XDG_CONFIG_HOME/pingsweep/ipv6-map
+#   4. ~/.config/pingsweep/ipv6-map
+#
+# If no map entry matches, pingsweep falls back to auto mode for 10.0.VLAN.0/CIDR.
+
+# VLAN 1: legacy RFC1918 prefix (not 10.0.1.0/24) with its own /64
+192.168.1.0/24  2601:441:8483:b500
+
+# Example: guest Wi-Fi on a non-standard IPv4 plan
+# 172.16.50.0/24  2601:441:8483:b550
