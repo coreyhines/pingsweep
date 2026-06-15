@@ -34,6 +34,7 @@ jobs:
         run: |
           printf '192.168.1.0/24\t2601:441:8483:b500\n' > /tmp/pingsweep-ipv6-map
           ./pingsweep -n -q --v6 --v6-map /tmp/pingsweep-ipv6-map 192.168.1.0/30 | grep -q '2601:441:8483:b500::'
+          ! ./pingsweep -n -q --v6 --v6-map /tmp/pingsweep-ipv6-map 10.0.2.0/30 2>/dev/null | grep -q '2601:441:8483:b500::'
 
   release:
     if: >-

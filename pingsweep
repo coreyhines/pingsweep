@@ -107,6 +107,18 @@ ipv4_in_subnet() {
   (( net_dec == ip_dec ))
 }
 
+# True when map CIDR (outer) covers the scanned CIDR (inner).
+ipv4_cidr_contains() {
+  local outer="$1" inner="$2"
+  local inner_norm outer_norm inner_mask outer_mask
+  inner_norm=$(normalize_ipv4_cidr "$inner")
+  outer_norm=$(normalize_ipv4_cidr "$outer")
+  inner_mask="${inner_norm#*/}"
+  outer_mask="${outer_norm#*/}"
+  (( inner_mask >= outer_mask )) || return 1
+  ipv4_in_subnet "${inner_norm%/*}" "$outer_norm"
+}
+
 # First four hextets of the interface's global /64 (e.g. 2601:441:8483:b502)
 extract_prefix64_base() {
   local addr_cidr="$1"
@@ -123,7 +135,9 @@ ipv6_scan_iface=""
 ipv6_map_file=""
 
 normalize_ipv4_cidr() {
-  local subnet="$1" ip_part="${subnet%/*}" cidr="${subnet#*/}"
+  local subnet="$1"
+  local ip_part="${subnet%/*}"
+  local cidr="${subnet#*/}"
   local ip1 ip2 ip3 ip4
   IFS=. read -r ip1 ip2 ip3 ip4 <<< "$ip_part"
   local host_bits=$((32 - cidr))
@@ -155,9 +169,8 @@ ipv6_map_config_paths() {
 # Return configured /64 base (four hextets) when scan CIDR matches a map entry.
 ipv6_map_lookup() {
   local scan_cidr="$1"
-  local normalized_scan map_path line entry_cidr prefix normalized_entry
-
-  normalized_scan=$(normalize_ipv4_cidr "$scan_cidr")
+  local map_path line entry_cidr prefix normalized_entry
+  local best_prefix="" best_mask=-1 entry_mask
 
   while IFS= read -r map_path; do
     [[ -n "$map_path" && -f "$map_path" ]] || continue
@@ -177,14 +190,22 @@ ipv6_map_lookup() {
         echo "Warning: skipping invalid IPv6 prefix in IPv6 map ($map_path): $prefix" >&2
         continue
       fi
+      if ! ipv4_cidr_contains "$entry_cidr" "$scan_cidr"; then
+        continue
+      fi
       normalized_entry=$(normalize_ipv4_cidr "$entry_cidr")
-      if [[ "$normalized_scan" == "$normalized_entry" ]]; then
-        printf '%s\n' "$(printf '%s' "$prefix" | tr 'A-F' 'a-f')"
-        return 0
+      entry_mask="${normalized_entry#*/}"
+      if (( entry_mask > best_mask )); then
+        best_mask=$entry_mask
+        best_prefix="$(printf '%s' "$prefix" | tr 'A-F' 'a-f')"
       fi
     done < "$map_path"
   done < <(ipv6_map_config_paths)
 
+  if [[ -n "$best_prefix" ]]; then
+    printf '%s\n' "$best_prefix"
+    return 0
+  fi
   return 1
 }
 
