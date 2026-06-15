@@ -60,21 +60,39 @@ ping4_host() {
   ping -c1 -W"$ping_timeout" "$1" >/dev/null 2>&1
 }
 
+# Use outbound iface for ping6 only when its global /64 matches the target /64.
+# Cross-VLAN scans (e.g. b508 host probing b502) rely on system routing instead.
+ping6_iface_for_target() {
+  local target="$1" iface="${2:-}"
+  local if_v6 if_base target_base
+  [[ -n "$iface" ]] || return 1
+  IFS=$'\t' read -r if_v6 _ < <(iface_ipv6_cidr "$iface") || return 1
+  if_base=$(extract_prefix64_base "$if_v6")
+  [[ -n "$if_base" ]] || return 1
+  target_base="${target%::*}"
+  [[ -n "$target_base" ]] || return 1
+  [[ "$(printf '%s' "$if_base" | tr 'A-F' 'a-f')" == \
+     "$(printf '%s' "$target_base" | tr 'A-F' 'a-f')" ]] || return 1
+  printf '%s\n' "$iface"
+}
+
 ping6_host() {
   local target="$1"
   local iface="${2:-}"
+  local bind_iface=""
+  bind_iface=$(ping6_iface_for_target "$target" "$iface" 2>/dev/null || true)
   # macOS/BSD ping6 has no reply timeout flag (-W/-w mean something else); use -c1 only.
   case "$(uname -s)" in
     Darwin|*BSD*)
-      if [[ -n "$iface" ]]; then
-        ping6 -c1 -b "$iface" "$target" >/dev/null 2>&1
+      if [[ -n "$bind_iface" ]]; then
+        ping6 -c1 -I "$bind_iface" "$target" >/dev/null 2>&1
       else
         ping6 -c1 "$target" >/dev/null 2>&1
       fi
       ;;
     *)
-      if [[ -n "$iface" ]]; then
-        ping -6 -c1 -W"$ping_timeout" -I "$iface" "$target" >/dev/null 2>&1
+      if [[ -n "$bind_iface" ]]; then
+        ping -6 -c1 -W"$ping_timeout" -I "$bind_iface" "$target" >/dev/null 2>&1
       else
         ping -6 -c1 -W"$ping_timeout" "$target" >/dev/null 2>&1
       fi
