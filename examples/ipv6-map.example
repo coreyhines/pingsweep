@@ -16,7 +16,7 @@
 # If no map entry matches, pingsweep falls back to auto mode for 10.0.VLAN.0/CIDR.
 
 # VLAN 1: legacy RFC1918 prefix (not 10.0.1.0/24) with its own /64
-192.168.1.0/24  2601:441:8483:b500
+192.168.1.0/24  fdc0:ffee:cafe:1
 
 # Example: guest Wi-Fi on a non-standard IPv4 plan
-# 172.16.50.0/24  2601:441:8483:b550
+# 172.16.50.0/24  fdc0:ffee:cafe:50

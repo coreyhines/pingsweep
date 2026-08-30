@@ -137,7 +137,7 @@ ipv4_cidr_contains() {
   ipv4_in_subnet "${inner_norm%/*}" "$outer_norm"
 }
 
-# First four hextets of the interface's global /64 (e.g. 2601:441:8483:b502)
+# First four hextets of the interface's global/ULA /64 (e.g. fdc0:ffee:cafe:8)
 extract_prefix64_base() {
   local addr_cidr="$1"
   if command -v python3 >/dev/null 2>&1; then
@@ -316,13 +316,15 @@ iface_ipv6_cidr() {
   printf '%s\t%s\n' "$v6_cidr" "${ipv4_addr:-}"
 }
 
-# Aligned /64 for the scanned subnet: PD stem from this host + VLAN = IPv4 3rd octet.
-# e.g. local b508 on 10.0.8.x + scan 10.0.10.0/24 -> 2601:441:8483:b501
+# Aligned /64 for the scanned subnet from this host's global/ULA /64 + IPv4 3rd octet.
+# Two 4th-hextet layouts are supported:
+#   Direct VLAN (ULA): fdc0:ffee:cafe:8  + scan 10.0.10.0/24 -> fdc0:ffee:cafe:10
+#   Legacy PD stem:    2601:441:8483:b508 + scan 10.0.10.0/24 -> 2601:441:8483:b501
 find_local_ipv6_context() {
   local cidr="$1"
   local probe_ip="${cidr%/*}"
   local v6_cidr="" prefix_base mapped_prefix
-  local net_o1 net_o2 target_vlan h1 h2 h3 h4 stem hextet_len
+  local net_o1 net_o2 target_vlan h1 h2 h3 h4 stem hextet_len vlan_digit
 
   if [[ "$probe_ip" == 127.* ]]; then
     return 1
@@ -341,7 +343,7 @@ find_local_ipv6_context() {
   if [[ "$net_o1" != "10" || "$net_o2" != "0" ]] || [[ -z "$target_vlan" ]]; then
     echo "Error: --v6 has no auto-aligned prefix for ${cidr}" >&2
     echo "Add a mapping in ~/.config/pingsweep/ipv6-map (or set PINGSWEEP_IPV6_MAP / --v6-map)." >&2
-    echo "Auto mode expects 10.0.VLAN.0/CIDR where VLAN matches the IPv6 hextet digit." >&2
+    echo "Auto mode expects 10.0.VLAN.0/CIDR where VLAN matches the IPv6 4th hextet." >&2
     return 1
   fi
 
@@ -357,19 +359,30 @@ find_local_ipv6_context() {
   [[ -n "$prefix_base" && "$prefix_base" != "::1" ]] || return 1
 
   IFS=: read -r h1 h2 h3 h4 <<< "$prefix_base"
+  [[ -n "$h4" ]] || {
+    echo "Error: --v6 cannot parse VLAN from IPv6 hextet '${h4}' (from ${v6_cidr})" >&2
+    return 1
+  }
+
+  ipv6_prefix_from_map=false
+  # Decimal-only 4th hextet => VLAN is the whole hextet (fdc0:ffee:cafe:8).
+  if [[ "$h4" =~ ^[0-9]+$ ]]; then
+    ipv6_prefix64="${h1}:${h2}:${h3}:${target_vlan}"
+    return 0
+  fi
+
+  # Legacy PD: shared stem + one VLAN digit (b502 = VLAN 2, b508 = VLAN 8).
+  # VLAN >= 10 drops the ones digit: VLAN 10 -> b501, VLAN 24 -> b502.
   hextet_len=${#h4}
   if (( hextet_len < 2 )); then
     echo "Error: --v6 cannot parse VLAN from IPv6 hextet '${h4}' (from ${v6_cidr})" >&2
     return 1
   fi
-  # 4th hextet: shared stem + one VLAN digit (b502 = VLAN 2, b508 = VLAN 8).
-  # VLAN >= 10 drops the ones digit: VLAN 10 -> b501, VLAN 24 -> b502.
-  local vlan_digit="$target_vlan"
+  vlan_digit="$target_vlan"
   if (( target_vlan >= 10 )); then
     vlan_digit=$(( target_vlan / 10 ))
   fi
   stem="${h4:0:$(( hextet_len - 1 ))}"
-  ipv6_prefix_from_map=false
   ipv6_prefix64="${h1}:${h2}:${h3}:${stem}${vlan_digit}"
   return 0
 }
