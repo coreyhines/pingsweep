@@ -53,7 +53,10 @@ This copies the script to `~/.local/bin/pingsweep`, adds a wrapper to `~/.zshfun
 
 IPv4 sweeps stay the same; `--v6` adds **parallel** ICMPv6 probes for every address in the range — no waiting for IPv4 to return first.
 
-For each IPv4 target `10.0.2.4`, pingsweep also pings an **aligned** address `{local-/64}::4`, using a derived global IPv6 `/64` for the scanned VLAN. The host-id is the **last IPv4 octet** (decimal). The VLAN is encoded in the **last digit** of the fourth hextet (`b502` = VLAN 2, `b508` = VLAN 8); for VLAN ≥ 10 the ones digit is dropped (`10.0.10.x` → `…b501::N`, not `…b510::N`).
+For each IPv4 target `10.0.2.4`, pingsweep also pings an **aligned** address `{local-/64}::4`, using a derived IPv6 `/64` for the scanned VLAN. The host-id is the **last IPv4 octet** (decimal). Auto mode detects how this host encodes VLAN in the fourth hextet:
+
+- **Direct VLAN** (decimal hextet, e.g. ULA `fdc0:ffee:cafe:8`) — 4th hextet is the VLAN (`10.0.10.x` → `fdc0:ffee:cafe:10::N`)
+- **Legacy PD stem** (e.g. `2601:…:b508`) — last digit of the 4th hextet is the VLAN; for VLAN ≥ 10 the ones digit is dropped (`10.0.10.x` → `…b501::N`)
 
 When reverse/forward DNS is available (`dig`), pingsweep checks whether the `AAAA` matches that aligned address and flags **mismatch** (e.g. `A` → `.4` but `AAAA` → `::feed`). Non-aligned `AAAA` targets are pinged as well so DHCP-registered v6-only names can still be found.
 
@@ -74,7 +77,7 @@ When reverse/forward DNS is available (`dig`), pingsweep checks whether the `AAA
 ```bash
 pingsweep --v6 10.0.2.0/24
 # 10.0.2.2   v4:up   v6:up(::2)   pi.hole
-# 10.0.2.5   v4:up   v6:down(::5)   host5.example.com  AAAA 2601:…::feed (expected ::5)
+# 10.0.2.5   v4:up   v6:down(::5)   host5.example.com  AAAA fdc0:…::feed (expected ::5)
 ```
 
 Text mode drops the old `dns:` column; alignment issues appear as a yellow trailing note only when `A`/`AAAA` disagree with the aligned model. JSON/YAML/CSV still include `dns_alignment` and record fields for scripting.
@@ -89,14 +92,14 @@ pingsweep -n --v6 10.0.2.0/29
 
 ### IPv6 map (non-standard subnets)
 
-Auto `--v6` mode derives the IPv6 `/64` from **this host’s** addresses and assumes IPv4 subnets look like `10.0.VLAN.0/CIDR`, where the VLAN digit is encoded in the fourth IPv6 hextet (`b502` = VLAN 2, `b508` = VLAN 8).
+Auto `--v6` mode derives the IPv6 `/64` from **this host’s** addresses and assumes IPv4 subnets look like `10.0.VLAN.0/CIDR`. The fourth hextet is either the VLAN itself (`fdc0:ffee:cafe:8`) or a legacy PD stem plus digit (`b508`).
 
-Some sites have **exceptions** — for example VLAN 1 on `192.168.1.0/24` with IPv6 `2601:441:8483:b500::/64` instead of `10.0.1.0/24`. Add a user-space map so `--v6` still aligns `::N` from the last IPv4 octet.
+Some sites have **exceptions** — for example VLAN 1 on `192.168.1.0/24` instead of `10.0.1.0/24`. Add a user-space map so `--v6` still aligns `::N` from the last IPv4 octet.
 
 **Map file format** (whitespace-separated, `#` comments):
 
 ```
-192.168.1.0/24  2601:441:8483:b500
+192.168.1.0/24  fdc0:ffee:cafe:1
 ```
 
 **Lookup order:**
@@ -115,7 +118,7 @@ cp examples/ipv6-map.example ~/.config/pingsweep/ipv6-map
 pingsweep --v6 192.168.1.0/24
 ```
 
-Host-id alignment is unchanged: `192.168.1.4` probes `2601:441:8483:b500::4`. Wrappers that translate VLAN numbers to CIDR (e.g. `sweep 1 --v6` → `192.168.1.0/24`) work once the map entry exists.
+Host-id alignment is unchanged: `192.168.1.4` probes `fdc0:ffee:cafe:1::4`. Wrappers that translate VLAN numbers to CIDR (e.g. `sweep 1 --v6` → `192.168.1.0/24`) work once the map entry exists.
 
 ## Examples
 
