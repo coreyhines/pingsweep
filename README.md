@@ -38,16 +38,29 @@ This copies the script to `~/.local/bin/pingsweep`, adds a wrapper to `~/.zshfun
 
 ```
   -f, --format FORMAT    Output format: text (default), json, yaml, or csv
-  -j, --jobs JOBS        Max concurrent jobs (default: 255)
+  -j, --jobs JOBS        Max concurrent jobs for ping engine (default: 255)
   -t, --timeout SECONDS  Timeout for ping and DNS queries (default: 1)
   -q, --quiet            Suppress progress and summary (text mode)
   -n, --dry-run          List IPs without scanning
   -s, --search PATTERN   Filter output (substring, wildcards, or re:regex)
+      --engine ENGINE    Discovery engine: auto (default; prefers fping), ping, or fping
       --v6               Parallel aligned IPv6 probes and DNS alignment checks
       --v6-map FILE      IPv4-CIDR to IPv6-/64 map file (see README)
   -v, --version          Show version
   -h, --help             Show help
 ```
+
+### fping (preferred when available)
+
+Discovery uses `fping` when it is on `PATH`, otherwise the system `ping`. No extra package is required. If `fping` is missing, a one-line install hint is printed (suppressed by `-q`).
+
+```bash
+./pingsweep 10.0.10.0/24                 # auto: fping if present
+./pingsweep --engine ping 10.0.10.0/24    # force classic ping
+./pingsweep --engine fping 10.0.10.0/24   # require fping
+```
+
+Install hints by platform (examples): `brew install fping`, `apt install fping`, `dnf install fping`.
 
 ## IPv6 follow-up (`--v6`)
 

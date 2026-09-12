@@ -60,6 +60,30 @@ ping4_host() {
   ping -c1 -W"$ping_timeout" "$1" >/dev/null 2>&1
 }
 
+# Bulk IPv4 alive list via fping (one probe, ms timeout). Writes IPs to $2.
+fping4_alive() {
+  local subnet="$1" outfile="$2"
+  fping -4 -a -q -r 0 -i 1 -t "$fping_timeout" -g "$subnet" > "$outfile" 2>/dev/null || true
+}
+
+# Bulk IPv6 alive list from a file of targets. Optional bind iface as $3.
+fping6_alive() {
+  local listfile="$1" outfile="$2" iface="${3:-}"
+  if [[ -n "$iface" ]]; then
+    fping -6 -a -q -r 0 -i 1 -t "$fping_timeout" -I "$iface" -f "$listfile" \
+      > "$outfile" 2>/dev/null || true
+  else
+    fping -6 -a -q -r 0 -i 1 -t "$fping_timeout" -f "$listfile" \
+      > "$outfile" 2>/dev/null || true
+  fi
+}
+
+ip_in_list_file() {
+  local needle="$1" listfile="$2"
+  [[ -s "$listfile" ]] || return 1
+  grep -Fxq -- "$needle" "$listfile"
+}
+
 # Use outbound iface for ping6 only when its global /64 matches the target /64.
 # Cross-VLAN scans (e.g. b508 host probing b502) rely on system routing instead.
 ping6_iface_for_target() {
@@ -460,10 +484,14 @@ show_progress() {
 
 # Default concurrency level (bash can handle more than zsh)
 max_jobs=255
+jobs_explicit=false
 
 # User-facing timeout in seconds (default 1s). Per-tool values are derived after
 # arg parsing because ping -W units differ by platform (see below).
 timeout_seconds=${timeout:-1}
+
+# Discovery engine: auto (prefer fping), or force ping|fping via --engine
+engine="auto"
 
 format="text"
 subnet=""
@@ -474,6 +502,37 @@ scan_ipv6=false
 ipv6_prefix_from_map=false
 RECORD_FS=$'\x1e'
 
+fping_install_hint() {
+  case "$(uname -s)" in
+    Darwin)
+      printf 'brew install fping'
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1 || command -v apt >/dev/null 2>&1; then
+        printf 'apt install fping'
+      elif command -v dnf >/dev/null 2>&1; then
+        printf 'dnf install fping'
+      elif command -v yum >/dev/null 2>&1; then
+        printf 'yum install fping'
+      elif command -v pacman >/dev/null 2>&1; then
+        printf 'pacman -S fping'
+      elif command -v zypper >/dev/null 2>&1; then
+        printf 'zypper install fping'
+      elif command -v apk >/dev/null 2>&1; then
+        printf 'apk add fping'
+      else
+        printf 'install fping'
+      fi
+      ;;
+    FreeBSD)
+      printf 'pkg install fping'
+      ;;
+    *)
+      printf 'install fping'
+      ;;
+  esac
+}
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -483,6 +542,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     -j|--jobs)
       max_jobs="$2"
+      jobs_explicit=true
       shift 2
       ;;
     -t|--timeout)
@@ -501,6 +561,10 @@ while [[ $# -gt 0 ]]; do
       filter="$2"
       shift 2
       ;;
+    --engine)
+      engine="$2"
+      shift 2
+      ;;
     --v6)
       scan_ipv6=true
       shift
@@ -517,11 +581,12 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: pingsweep [options] <CIDR subnet>"
       echo "Options:"
       echo "  -f, --format FORMAT    Output format: text (default), json, yaml, or csv"
-      echo "  -j, --jobs JOBS        Max concurrent jobs (default: 255)"
+      echo "  -j, --jobs JOBS        Max concurrent jobs for ping engine (default: 255)"
       echo "  -t, --timeout SECONDS  Timeout for ping/DNS queries (default: 1)"
       echo "  -q, --quiet            Quiet mode - suppress progress output"
       echo "  -n, --dry-run          Show IPs that would be scanned without scanning"
       echo "  -s, --search SEARCH   Search/filter output (supports substring, wildcards, or regex with re: prefix)"
+      echo "      --engine ENGINE   Discovery engine: auto (default; prefers fping), ping, or fping"
       echo "      --v6              Parallel aligned IPv6 probes and DNS alignment checks (see README)"
       echo "      --v6-map FILE     IPv4-CIDR to IPv6-/64 map file (overrides default paths)"
       echo "  -v, --version         Show version information"
@@ -531,6 +596,7 @@ while [[ $# -gt 0 ]]; do
       echo "         pingsweep -j 100 192.168.1.0/24"
       echo "         pingsweep -s 'router*' 192.168.1.0/24"
       echo "         pingsweep --search 're:^192\\.168\\.1\\.[0-9]+ up' 192.168.1.0/24"
+      echo "         pingsweep --engine ping 10.0.2.0/24"
       echo "         pingsweep --v6 10.0.2.0/24"
       exit 0
       ;;
@@ -543,6 +609,32 @@ done
 
 check_requirements
 
+if [[ "$engine" != "auto" && "$engine" != "ping" && "$engine" != "fping" ]]; then
+  echo "Error: --engine must be 'auto', 'ping', or 'fping' (got: $engine)" >&2
+  exit 1
+fi
+
+if [[ "$engine" == "auto" ]]; then
+  if command -v fping >/dev/null 2>&1; then
+    engine="fping"
+  else
+    engine="ping"
+    if [ "$quiet" = false ]; then
+      echo "Faster with fping: $(fping_install_hint)" >&2
+    fi
+  fi
+elif [[ "$engine" == "fping" ]]; then
+  if ! command -v fping >/dev/null 2>&1; then
+    echo "Error: --engine fping requires 'fping' on PATH." >&2
+    echo "Install: $(fping_install_hint)" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$engine" == "fping" ]] && [ "$jobs_explicit" = true ] && [ "$quiet" = false ]; then
+  echo "Warning: -j/--jobs is ignored with fping (single-process fanout)." >&2
+fi
+
 if [ "$scan_ipv6" = true ] && ! command -v dig >/dev/null 2>&1; then
   echo "Warning: 'dig' not found; --v6 will ping aligned addresses but skip DNS alignment checks." >&2
 fi
@@ -554,7 +646,9 @@ fi
 
 # Derive per-tool timeouts from the user-facing seconds value. dig's +time is
 # always seconds; ping's -W is milliseconds on macOS/BSD but seconds on Linux.
+# fping -t is always milliseconds.
 dns_timeout="$timeout_seconds"
+fping_timeout=$(( timeout_seconds * 1000 ))
 case "$(uname -s)" in
   Darwin|*BSD*) ping_timeout=$(( timeout_seconds * 1000 )) ;;
   *)            ping_timeout="$timeout_seconds" ;;
@@ -690,11 +784,13 @@ fi
 
 if [[ "$format" == "text" ]] && [ "$quiet" = false ]; then
   ipv6_banner=""
+  engine_banner=""
   [[ "$scan_ipv6" == true ]] && ipv6_banner=" with IPv6"
+  [[ "$engine" == "fping" ]] && engine_banner=" [fping]"
   if [ "$show_progress" = true ]; then
-    echo "Scanning $subnet ($total_ips IPs)${ipv6_banner}..." >&2
+    echo "Scanning $subnet ($total_ips IPs)${ipv6_banner}${engine_banner}..." >&2
   else
-    echo "Scanning $subnet${ipv6_banner}..." >&2
+    echo "Scanning $subnet${ipv6_banner}${engine_banner}..." >&2
   fi
 fi
 
@@ -708,7 +804,7 @@ last_24_block=""
 
 # Use a temporary file to avoid process substitution issues
 results_file=$(mktemp)
-trap "rm -f '$results_file' '$results_file.ips'" EXIT # Ensure temp files are cleaned up
+trap "rm -f '$results_file' '$results_file.ips' '$results_file.fping4' '$results_file.fping6' '$results_file.v6list' '$results_file.pairs'" EXIT
 
 # Generate IP list - use prips if available, otherwise use built-in generator
 if [ "$use_prips" = true ]; then
@@ -778,107 +874,222 @@ else
   NC=""
 fi
 
-# Process IPs with batched concurrency (inline blocks to avoid job table overflow)
-while IFS= read -r ip; do
+# Process IPs: ping engine (batched jobs) or fping engine (bulk ICMP then DNS)
+if [[ "$engine" == "fping" ]]; then
   if [ "$scan_ipv6" = true ]; then
-    aligned_v6=$(aligned_ipv6_address "$ip" "$ipv6_prefix64")
-    {
+    : > "$results_file.v6list"
+    : > "$results_file.pairs"
+    while IFS= read -r ip; do
+      aligned_v6=$(aligned_ipv6_address "$ip" "$ipv6_prefix64")
+      printf '%s\n' "$aligned_v6" >> "$results_file.v6list"
+      printf '%s\t%s\n' "$ip" "$aligned_v6" >> "$results_file.pairs"
+    done < "$results_file.ips"
+
+    fping4_alive "$subnet" "$results_file.fping4"
+
+    fping6_bind=""
+    if [[ -n "${ipv6_scan_iface:-}" ]]; then
+      sample_v6=$(head -1 "$results_file.v6list" 2>/dev/null || true)
+      if [[ -n "$sample_v6" ]]; then
+        fping6_bind=$(ping6_iface_for_target "$sample_v6" "$ipv6_scan_iface" || true)
+      fi
+    fi
+    fping6_alive "$results_file.v6list" "$results_file.fping6" "$fping6_bind"
+
+    count=0
+    while IFS=$'\t' read -r ip aligned_v6; do
       v4_up=false
       v6_up=false
-      ping4_host "$ip" & pid4=$!
-      ping6_host "$aligned_v6" "$ipv6_scan_iface" & pid6=$!
-      wait "$pid4" && v4_up=true
-      wait "$pid6" && v6_up=true
-
-      hostname=""
-      a_record=""
-      aaaa_record=""
-      dns_align="no-name"
-      dns_v6_up=false
-      dns_v6_addr=""
-
-      if $v4_up; then
-        hostname=$(dns_lookup "$ip")
+      ip_in_list_file "$ip" "$results_file.fping4" && v4_up=true
+      ip_in_list_file "$aligned_v6" "$results_file.fping6" && v6_up=true
+      if ! $v4_up && ! $v6_up; then
+        continue
       fi
-      if [[ -z "$hostname" ]] && $v6_up; then
-        hostname=$(dns_lookup "$aligned_v6")
-      fi
+      {
+        hostname=""
+        a_record=""
+        aaaa_record=""
+        dns_align="no-name"
+        dns_v6_up=false
+        dns_v6_addr=""
 
-      if [[ -n "$hostname" ]]; then
-        a_record=$(dns_a_lookup "$hostname")
-        aaaa_record=$(dns_aaaa_lookup "$hostname")
-        if [[ -n "$aaaa_record" ]]; then
-          if ipv6_same "$aaaa_record" "$aligned_v6"; then
-            dns_align="aligned"
-            dns_v6_addr="$aaaa_record"
-            dns_v6_up=$v6_up
+        if $v4_up; then
+          hostname=$(dns_lookup "$ip")
+        fi
+        if [[ -z "$hostname" ]] && $v6_up; then
+          hostname=$(dns_lookup "$aligned_v6")
+        fi
+
+        if [[ -n "$hostname" ]]; then
+          a_record=$(dns_a_lookup "$hostname")
+          aaaa_record=$(dns_aaaa_lookup "$hostname")
+          if [[ -n "$aaaa_record" ]]; then
+            if ipv6_same "$aaaa_record" "$aligned_v6"; then
+              dns_align="aligned"
+              dns_v6_addr="$aaaa_record"
+              dns_v6_up=$v6_up
+            else
+              dns_align="mismatch"
+              dns_v6_addr="$aaaa_record"
+              if ip_in_list_file "$aaaa_record" "$results_file.fping6"; then
+                dns_v6_up=true
+              else
+                ping6_host "$aaaa_record" "$ipv6_scan_iface" && dns_v6_up=true
+              fi
+            fi
           else
-            dns_align="mismatch"
-            dns_v6_addr="$aaaa_record"
-            ping6_host "$aaaa_record" "$ipv6_scan_iface" && dns_v6_up=true
+            dns_align="no-aaaa"
           fi
-        else
-          dns_align="no-aaaa"
-        fi
-        if [[ -n "$a_record" && "$a_record" != "$ip" ]]; then
-          if [[ "$dns_align" == "aligned" ]]; then
-            dns_align="a-mismatch"
-          elif [[ "$dns_align" == "no-aaaa" || "$dns_align" == "no-name" ]]; then
-            dns_align="a-mismatch"
+          if [[ -n "$a_record" && "$a_record" != "$ip" ]]; then
+            if [[ "$dns_align" == "aligned" ]]; then
+              dns_align="a-mismatch"
+            elif [[ "$dns_align" == "no-aaaa" || "$dns_align" == "no-name" ]]; then
+              dns_align="a-mismatch"
+            fi
           fi
         fi
-      fi
 
-      if $v4_up || $v6_up || $dns_v6_up; then
-        v4_status=$($v4_up && echo up || echo down)
-        v6_status=$($v6_up && echo up || echo down)
-        dns_v6_status=""
-        [[ -n "$dns_v6_addr" ]] && dns_v6_status=$($dns_v6_up && echo up || echo down)
-        printf '%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\n' \
-          "$ip" "$v4_status" "$v6_status" "$aligned_v6" \
-          "$hostname" "$a_record" "$aaaa_record" "$dns_align" "$dns_v6_status" "$dns_v6_addr" \
-          >> "$results_file"
+        if $v4_up || $v6_up || $dns_v6_up; then
+          v4_status=$($v4_up && echo up || echo down)
+          v6_status=$($v6_up && echo up || echo down)
+          dns_v6_status=""
+          [[ -n "$dns_v6_addr" ]] && dns_v6_status=$($dns_v6_up && echo up || echo down)
+          printf '%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\n' \
+            "$ip" "$v4_status" "$v6_status" "$aligned_v6" \
+            "$hostname" "$a_record" "$aaaa_record" "$dns_align" "$dns_v6_status" "$dns_v6_addr" \
+            >> "$results_file"
+        fi
+      } &
+      count=$((count + 1))
+      if (( count % max_jobs == 0 )); then
+        wait
       fi
-    } &
+    done < "$results_file.pairs"
+    wait
   else
-    {
-      if ping4_host "$ip"; then
+    fping4_alive "$subnet" "$results_file.fping4"
+    count=0
+    while IFS= read -r ip; do
+      [[ -z "$ip" ]] && continue
+      {
         hostname=$(dns_lookup "$ip")
         if [[ -n "$hostname" ]]; then
           echo "$ip up $hostname" >> "$results_file"
         else
           echo "$ip up" >> "$results_file"
         fi
+      } &
+      count=$((count + 1))
+      if (( count % max_jobs == 0 )); then
+        wait
       fi
-    } &
-  fi
-  
-  ((count++))
-
-  # Wait every max_jobs iterations (batched wait)
-  if (( count % max_jobs == 0 )); then
+    done < "$results_file.fping4"
     wait
   fi
+else
+  # ping engine: batched concurrency (inline blocks to avoid job table overflow)
+  while IFS= read -r ip; do
+    if [ "$scan_ipv6" = true ]; then
+      aligned_v6=$(aligned_ipv6_address "$ip" "$ipv6_prefix64")
+      {
+        v4_up=false
+        v6_up=false
+        ping4_host "$ip" & pid4=$!
+        ping6_host "$aligned_v6" "$ipv6_scan_iface" & pid6=$!
+        wait "$pid4" && v4_up=true
+        wait "$pid6" && v6_up=true
 
-  # Update progress for large subnets
-  if [ "$show_progress" = true ] && [[ "$format" == "text" ]]; then
-    # Extract /24 block from IP (first 3 octets)
-    current_24_block=$(echo "$ip" | cut -d. -f1-3).0/24
+        hostname=""
+        a_record=""
+        aaaa_record=""
+        dns_align="no-name"
+        dns_v6_up=false
+        dns_v6_addr=""
 
-    # Show progress when /24 block changes or every 50 IPs
-    if [ "$current_24_block" != "$last_24_block" ] || (( count % 50 == 0 )); then
-      progress_percent=$(( (count * 100) / total_ips ))
-      show_progress "$current_24_block" "$progress_percent"
-      last_24_block="$current_24_block"
+        if $v4_up; then
+          hostname=$(dns_lookup "$ip")
+        fi
+        if [[ -z "$hostname" ]] && $v6_up; then
+          hostname=$(dns_lookup "$aligned_v6")
+        fi
+
+        if [[ -n "$hostname" ]]; then
+          a_record=$(dns_a_lookup "$hostname")
+          aaaa_record=$(dns_aaaa_lookup "$hostname")
+          if [[ -n "$aaaa_record" ]]; then
+            if ipv6_same "$aaaa_record" "$aligned_v6"; then
+              dns_align="aligned"
+              dns_v6_addr="$aaaa_record"
+              dns_v6_up=$v6_up
+            else
+              dns_align="mismatch"
+              dns_v6_addr="$aaaa_record"
+              ping6_host "$aaaa_record" "$ipv6_scan_iface" && dns_v6_up=true
+            fi
+          else
+            dns_align="no-aaaa"
+          fi
+          if [[ -n "$a_record" && "$a_record" != "$ip" ]]; then
+            if [[ "$dns_align" == "aligned" ]]; then
+              dns_align="a-mismatch"
+            elif [[ "$dns_align" == "no-aaaa" || "$dns_align" == "no-name" ]]; then
+              dns_align="a-mismatch"
+            fi
+          fi
+        fi
+
+        if $v4_up || $v6_up || $dns_v6_up; then
+          v4_status=$($v4_up && echo up || echo down)
+          v6_status=$($v6_up && echo up || echo down)
+          dns_v6_status=""
+          [[ -n "$dns_v6_addr" ]] && dns_v6_status=$($dns_v6_up && echo up || echo down)
+          printf '%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\x1e%s\n' \
+            "$ip" "$v4_status" "$v6_status" "$aligned_v6" \
+            "$hostname" "$a_record" "$aaaa_record" "$dns_align" "$dns_v6_status" "$dns_v6_addr" \
+            >> "$results_file"
+        fi
+      } &
+    else
+      {
+        if ping4_host "$ip"; then
+          hostname=$(dns_lookup "$ip")
+          if [[ -n "$hostname" ]]; then
+            echo "$ip up $hostname" >> "$results_file"
+          else
+            echo "$ip up" >> "$results_file"
+          fi
+        fi
+      } &
     fi
-  fi
-done < "$results_file.ips"
 
-# Wait for all background jobs to complete
-wait
+    count=$((count + 1))
 
-# Clean up IP list file
-rm -f "$results_file.ips"
+    # Wait every max_jobs iterations (batched wait)
+    if (( count % max_jobs == 0 )); then
+      wait
+    fi
+
+    # Update progress for large subnets
+    if [ "$show_progress" = true ] && [[ "$format" == "text" ]]; then
+      # Extract /24 block from IP (first 3 octets)
+      current_24_block=$(echo "$ip" | cut -d. -f1-3).0/24
+
+      # Show progress when /24 block changes or every 50 IPs
+      if [ "$current_24_block" != "$last_24_block" ] || (( count % 50 == 0 )); then
+        progress_percent=$(( (count * 100) / total_ips ))
+        show_progress "$current_24_block" "$progress_percent"
+        last_24_block="$current_24_block"
+      fi
+    fi
+  done < "$results_file.ips"
+
+  # Wait for all background jobs to complete
+  wait
+fi
+
+# Clean up IP list / fping temp files
+rm -f "$results_file.ips" "$results_file.fping4" "$results_file.fping6" \
+  "$results_file.v6list" "$results_file.pairs"
 
 # Clear progress line if we were showing progress
 if [ "$show_progress" = true ] && [[ "$format" == "text" ]]; then
